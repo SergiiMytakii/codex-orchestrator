@@ -11,6 +11,7 @@ import { acquireOwnerControlLock, inspectProcessIdentity, readProcessStartIdenti
 import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity } from '../src/v2/process-identity.js';
 import { createFrozenReviewFeedbackBatch, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
+import { runConfiguredChecks } from '../src/v2/runner-checks.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 
 export function recoveryConfig(): AgentAutoConfig {
@@ -18,9 +19,9 @@ export function recoveryConfig(): AgentAutoConfig {
   return {
     schema: 'codex-orchestrator.agent-auto', version: 2,
     github: { owner: 'owner', repo: 'repo', baseBranch: 'main', labels: { auto: label('agent:auto'), running: label('agent:running'), blocked: label('agent:blocked'), review: label('agent:review') } },
-    runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60 },
+    runner: { checkExecution: 'host', workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60 },
     codex: { command: 'codex', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },
-    checks: { first: 'first', second: 'second' }, proof: { artifactDir: '.codex-orchestrator/proofs' }, deny: { readPaths: [], commands: [] },
+    checks: { first: 'test -f feature.txt && printf first', second: 'test -f feature.txt && printf second' }, proof: { artifactDir: '.codex-orchestrator/proofs' }, deny: { readPaths: [], commands: [] },
   };
 }
 
@@ -51,13 +52,14 @@ async function executeWorker(root: string, checkpoint: string) {
     compareAndSwap: async (generation, next) => {
       const saved = await store.compareAndSwap(generation, next);
       const run = saved.runs.at(-1)!;
+      if (run.runnerChecks?.status === 'complete' && !run.implementationResult) await pause('host-checks');
       if (run.lifecycle === 'checking' && run.candidateBinding && run.checks.length === 0) await pause('implementation');
       if (run.checks.length === 2 && run.checks.every((check) => check.status === 'passed') && !run.proofReceipt) await pause('checks');
       if (run.proofReceipt && !run.terminalOutcome) await pause('proof');
       if (run.lifecycle === 'publishing' && run.implementationResult?.review) await pause('review');
       if (run.terminalOutcome?.status === 'review-ready') await pause('publication');
       if (run.pendingEffect?.kind === 'issue-feedback-comment') await pause('before:answer-comment');
-      if (run.activeAttempt?.operationId === 'implementation' && run.activeAttempt.stage === 'observed') await pause('owner:result-observed');
+      if (run.activeAttempt?.operationId === 'implementation' && run.activeAttempt.stage === 'observed' && run.runnerChecks?.status === 'complete') await pause('owner:result-observed');
       if (run.implementationReportCorrection && run.activeAttempt?.stage === 'adopted') await pause('owner:correction-persisted');
       return saved;
     },
@@ -98,6 +100,11 @@ async function executeWorker(root: string, checkpoint: string) {
       createDraft: async ({ body }) => { const value = await remote(); value.pullRequest = { url: 'https://example.invalid/pull/1', body }; await saveRemote(value); await event('pr'); await pause('effect:pr'); return { url: value.pullRequest.url }; },
     },
     git,
+    configuredChecks: { run: async (input) => {
+      const results = await runConfiguredChecks({ ...input, logRoot: join(root, 'host-check-logs', randomUUID()), timeoutMs: 5000, env: process.env });
+      for (const result of results) await event(`host-check:${result.id}`);
+      return results;
+    } },
     implementationAgent: { run: async (input) => {
       const retained = (await store.read()).runs[0]?.activeAttempt;
       if (retained?.stage === 'observed' && retained.result) {
@@ -115,10 +122,11 @@ async function executeWorker(root: string, checkpoint: string) {
       if (input.reportCorrection) {
         if (!input.sessionId || sha256(input.reportCorrection.bytes) !== input.reportCorrection.sha256) throw new Error('owner correction lost exact report or native session');
         await event('owner-correction');
-      } else await event('implementation');
+      } else if (!input.runnerChecks) await event('implementation');
       await writeFile(join(input.worktreePath, 'feature.txt'), 'implemented\n');
-      for (const id of Object.keys(config.checks)) await event(`worker-check:${id}`);
       if (scenario.mode === 'blocked') return { kind: 'completed', report: { version: 1, status: 'external-block', summary: 'Unavailable test service.', changedFiles: ['feature.txt'], residualRisks: [], blocker: { kind: 'service', summary: 'Unavailable test service.', attempted: ['Observe service.'], resumable: false } } };
+      if (!input.runnerChecks) return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'checks-request', summary: 'Source ready for trusted host checks.', changedFiles: ['feature.txt'], residualRisks: [] } };
+      if (!input.sessionId || input.runnerChecks.status !== 'complete') throw new Error('host checks must resume the same native owner session');
       const source = await git.snapshot(input.worktreePath);
       await event('proof'); await event('review');
       if (scenario.mode === 'malformed-proof' && !input.reportCorrection) {
@@ -127,7 +135,7 @@ async function executeWorker(root: string, checkpoint: string) {
         await writeBound({ path: join(root, 'reports', `${input.attemptId}.json`), bytes: Buffer.from(canonicalJson(report)) });
         return { kind: 'completed', report };
       }
-      const checks = Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed' as const, outputSha256: sha256('ok') }));
+      const checks = Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed' as const, outputSha256: input.runnerChecks!.results.find(result => result.id === id)!.outputSha256 }));
       return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [], checks,
         proof: { version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
           criteria: input.frozenCriteria.map(c => ({ id: c.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [checks[0]!.id], analysis: 'The requested public behavior passes.' })),
@@ -184,7 +192,13 @@ async function executeWorker(root: string, checkpoint: string) {
       },
     } as unknown as ReviewFeedbackObserver;
   }
-  const result = await new RunIssue(dependencies).runIssue({ targetRoot: root, issueNumber: 42 });
+  const runner = new RunIssue(dependencies);
+  let result = await runner.runIssue({ targetRoot: root, issueNumber: 42 });
+  // The host-check handoff deliberately ends an invocation before resuming its native owner.
+  if (result.status === 'transport-failed' && (await store.read()).runs[0]?.runnerChecks?.status === 'complete'
+    && !(await store.read()).runs[0]?.implementationReportCorrection) {
+    result = await runner.runIssue({ targetRoot: root, issueNumber: 42 });
+  }
   process.send?.({ result });
 }
 

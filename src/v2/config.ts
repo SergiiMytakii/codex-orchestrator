@@ -118,7 +118,8 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
   assertStringArray(value.deny.commands, 'config.deny.commands');
   for (const command of value.deny.commands) assertCanonicalAbsolutePath(command, 'config.deny.commands');
 
-  return value as unknown as AgentAutoConfig;
+  const config = value as unknown as AgentAutoConfig;
+  return { ...config, runner: { ...config.runner, checkExecution: 'host' } };
 }
 
 function validateAndroidProof(value: unknown, field: string): void {

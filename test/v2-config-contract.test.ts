@@ -49,7 +49,7 @@ function validConfig(): AgentAutoConfig {
 test('V2 accepts the exact clean config and snapshots the only command, status, and label vocabulary', () => {
   const parsed = parseAgentAutoConfig(validConfig());
 
-  assert.deepEqual(parsed, validConfig());
+  assert.deepEqual(parsed, { ...validConfig(), runner: { ...validConfig().runner, checkExecution: 'host' } });
   assert.deepEqual(PUBLIC_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
@@ -76,7 +76,7 @@ test('the checked-in package config parses through the real V2 parser', async ()
     'utf8',
   ));
 
-  assert.deepEqual(parseAgentAutoConfig(checkedIn), checkedIn);
+  assert.deepEqual(parseAgentAutoConfig(checkedIn), { ...checkedIn, runner: { ...checkedIn.runner, checkExecution: 'host' } });
 });
 
 test('V2 rejects unknown configuration surfaces', () => {
@@ -94,6 +94,7 @@ test('V2 rejects unknown configuration surfaces', () => {
 test('V2 rejects invalid integers, non-canonical paths, commands, and empty policy strings', () => {
   const rejected = [
     { ...validConfig(), runner: { ...validConfig().runner, pollIntervalSeconds: 0 } },
+    { ...validConfig(), runner: { ...validConfig().runner, checkExecution: 'sandbox' } },
     { ...validConfig(), runner: { ...validConfig().runner, workspaceRoot: '../workspaces' } },
     { ...validConfig(), proof: { artifactDir: '/absolute/proofs' } },
     { ...validConfig(), deny: { ...validConfig().deny, readPaths: ['/tmp/../secret'] } },
@@ -164,4 +165,12 @@ test('CLI JSON and exit mapping are total over every public runIssue outcome', (
       result: entry.result,
     });
   }
+});
+
+test('legacy configurations default to host checks without mutating input', () => {
+  const legacy = validConfig();
+  delete legacy.runner.checkExecution;
+  const parsed = parseAgentAutoConfig(legacy);
+  assert.equal(parsed.runner.checkExecution, 'host');
+  assert.equal(legacy.runner.checkExecution, undefined);
 });

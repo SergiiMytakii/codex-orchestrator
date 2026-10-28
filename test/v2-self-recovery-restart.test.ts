@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { defaultProcessExecutor } from '../src/v2/adapters/command.js';
+import { sha256 } from '../src/v2/containment.js';
 import { recoveryStore } from './self-recovery-runner.js';
 import { mkdtemp } from './mission-test-temp.js';
 import type { RunIssueResult } from '../src/v2/run-issue.js';
@@ -109,7 +110,7 @@ test('worker observation rejects missing IPC only after close and retains raw st
   }
 });
 
-for (const checkpoint of ['implementation', 'checks', 'proof', 'review', 'publication', 'effect:claim-labels', 'effect:claim-comment', 'effect:commit', 'effect:push', 'effect:pr']) {
+for (const checkpoint of ['host-checks', 'implementation', 'checks', 'proof', 'review', 'publication', 'effect:claim-labels', 'effect:claim-comment', 'effect:commit', 'effect:push', 'effect:pr']) {
   test(`a real killed Runner resumes ${checkpoint} with durable identity and no duplicate successful work`, { timeout: 30_000 }, async () => {
     const root = await fixture();
     let first: ReturnType<typeof worker> | undefined;
@@ -127,7 +128,7 @@ for (const checkpoint of ['implementation', 'checks', 'proof', 'review', 'public
       const after = (await recoveryStore(root).read()).runs[0]!;
       assert.equal(after.runId, before.runId);
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'proof', 'review', 'claim-labels', 'claim-comment', 'commit', 'push', 'pr']) {
+      for (const event of ['implementation', 'host-check:first', 'host-check:second', 'proof', 'review', 'claim-labels', 'claim-comment', 'commit', 'push', 'pr']) {
         assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
       }
       const head = await git(after.worktreePath, ['rev-parse', 'HEAD']);
@@ -139,6 +140,12 @@ for (const checkpoint of ['implementation', 'checks', 'proof', 'review', 'public
       assert.equal(await git(root, ['rev-parse', `refs/remotes/origin/${after.branchName}`]), head);
       assert.equal(after.terminalOutcome!.status, 'review-ready');
       assert.equal(after.checks.length, 2);
+      assert.equal(after.runnerChecks?.status, 'complete');
+      for (const trusted of after.runnerChecks!.results) {
+        assert.equal(trusted.exitCode, 0);
+        assert.equal(trusted.outputSha256, sha256(await readFile(trusted.logPath)));
+        assert.equal(after.implementationResult!.checks!.find(check => check.id === trusted.id)!.outputSha256, trusted.outputSha256);
+      }
       for (const check of after.checks) { assert.ok('candidateTreeSha' in check); if ('candidateTreeSha' in check) assert.equal(check.candidateTreeSha, tree); }
       assert.ok(after.proofReceipt);
       assert.ok(after.implementationResult?.review);
@@ -178,8 +185,8 @@ for (const checkpoint of ['effect:terminal-comment', 'effect:terminal-labels']) 
       assert.equal(after.terminalNotifications!.comment.status, 'delivered');
       assert.equal(after.terminalNotifications!.labels.status, 'delivered');
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'terminal-comment', 'terminal-labels']) assert.equal(events.filter((value) => value === event).length, 1, events.join(','));
-      assert.equal(events.some((event) => ['review', 'commit', 'push', 'pr'].includes(event)), false);
+      for (const event of ['implementation', 'terminal-comment', 'terminal-labels']) assert.equal(events.filter((value) => value === event).length, 1, events.join(','));
+      assert.equal(events.some((event) => ['host-check:first', 'host-check:second', 'review', 'commit', 'push', 'pr'].includes(event)), false);
       const remote = JSON.parse(await readFile(join(root, 'github.json'), 'utf8'));
       assert.equal(remote.comments.filter((comment: { body: string }) => comment.body.split('\n')[0]!.endsWith(':blocked -->')).length, 1);
     } finally {
@@ -236,7 +243,7 @@ for (const scenario of [
       assert.equal(await git(after.worktreePath, ['rev-parse', 'HEAD']), original.reviewFeedback!.previousPublishedHeadSha);
       assert.equal(after.reviewFeedback!.consumedSourceIds.filter((id) => id === 'issue-comment:90071992547409939999').length, 1);
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'proof', 'review', 'commit', 'push', 'pr', 'answer-agent']) assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
+      for (const event of ['implementation', 'host-check:first', 'host-check:second', 'proof', 'review', 'commit', 'push', 'pr', 'answer-agent']) assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
       const finalRemote = JSON.parse(await readFile(remotePath, 'utf8'));
       const expectedComments = (scenario.revoke || scenario.close) && scenario.checkpoint === 'before:answer-comment' ? 0 : 1;
       assert.equal(finalRemote.comments.filter((comment: { body: string }) => comment.body.split('\n')[0] === marker).length, expectedComments);

@@ -12,7 +12,7 @@ import {
   materializeReportReadView,
   configuredCheckPolicySha256,
 } from '../src/v2/runtime.js';
-import type { AgentAutoConfig } from '../src/v2/config.js';
+import { parseAgentAutoConfig, type AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
 import {
   extractContainedWorkflowReferences,
@@ -279,13 +279,15 @@ test('host owner receives the same trusted baseline exception enforced by comple
   assert.doesNotMatch(prompt, /only after all required host checks passed/u);
 });
 
-test('resumed host owner without receipts requests fresh checks and receives artifact admission limits', async () => {
+test('legacy config owner without receipts requests host checks and receives artifact admission limits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-host-recovery-prompt-'));
   const worktree = join(root, 'worktree'); await mkdir(worktree);
   const workflowGeneration = await materializeWorkflowGeneration({
     packageRoot, runtimeRoot: root, packageVersion: '2.0.1', bootId: 'boot-a',
   });
-  const config = androidConfigFixture(); config.runner.checkExecution = 'host';
+  const legacy = androidConfigFixture();
+  delete legacy.runner.checkExecution;
+  const config = parseAgentAutoConfig(legacy);
   config.checks = { 'flutter-test': 'flutter test --no-pub' };
   let prompt = '';
   const agent = new ContainedImplementationAgent({ config: () => config, orchestratorHome: root,

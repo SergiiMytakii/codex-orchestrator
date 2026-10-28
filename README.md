@@ -63,8 +63,8 @@ npx codex-orchestrator setup --target "$PWD" --flutter-sdk "/absolute/path/to/fl
 ```
 
 Setup validates `bin/flutter` and runs `--version`, then records quoted absolute
-commands for `pub get --enforce-lockfile`, analyze, and tests in `checks`. It enables
-`runner.checkExecution: "host"`: these commands execute repository code with the
+commands for `pub get --enforce-lockfile`, analyze, and tests in `checks`. All projects use
+`runner.checkExecution: "host"` by default: these commands execute repository code with the
 Runner user's normal SDK, package cache, network and inherited environment.
 SDK paths containing spaces and shell metacharacters are supported on the existing
 POSIX host runtime. Setup does not install or copy SDKs. A dry run checks the
@@ -288,7 +288,7 @@ changes or substituted output hashes invalidate the results. A crash during host
 execution leaves an unfinished action rather than rerunning commands automatically.
 The existing owned-command fence protects unresolved process groups.
 
-Host npm checks use the same conservative related Jest selection as worker checks.
+Host npm checks use conservative related Jest selection.
 For ordinary full `flutter test` / `flutter test --no-pub` commands, Runner adds
 `--machine` to retain structured outcomes. When only Dart files under `lib/` and
 `test/` changed, a failed suite may be nonblocking only after Runner reproduces
@@ -380,10 +380,11 @@ Starting a new journal requires preserving the old file and checking ownership/r
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `runner.checkExecution`: optional `"host"` opts trusted projects into ordinary
-  local checks with installed tools; omission retains sandboxed worker execution.
+- `runner.checkExecution`: `"host"` runs checks as ordinary local processes with
+  installed tools and the Runner environment. Omission also defaults to `"host"`
+  for existing configurations. Setup writes this value explicitly.
 - `checks`: mandatory commands executed in configured order after the final source edit.
-  In host mode Runner executes them; otherwise the implementation worker does.
+  Runner executes them outside the Agent sandbox.
   Source edits after Review require fresh checks. Issue descriptions cannot
   waive them. Runner requires exact successful results before publication.
 - File lists in issues are starting points, not exhaustive allowlists. The
@@ -418,7 +419,7 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. Use setup `--flutter-sdk` to opt into ordinary host execution. Runner executes these exact commands after a `checks-request`, then resumes the same Agent for proof and independent Review. Other configurations retain sandboxed worker checks. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
+Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. Use setup `--flutter-sdk` to record the installed SDK commands. Runner executes these exact commands after a `checks-request`, then resumes the same Agent for proof and independent Review. All projects use host checks, including existing configurations without `runner.checkExecution`. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
 
 Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 
@@ -429,17 +430,16 @@ approving verdicts remain mandatory.
 
 ### Related Jest checks
 
-In worker-check mode the implementation owner invokes the supplied package check
-executable for each configured command. Recognized plain npm/Jest scripts use
+Runner invokes the package check executable on the host for each configured
+command. Recognized plain npm/Jest scripts use
 Jest's native `--findRelatedTests` over the complete diff from the run's base,
 including untracked source files and changed tests. Related failures and empty
 selections block completion. Configuration, deleted or unsupported files,
 executable Jest configuration, npm lifecycle hooks and local global Jest modules
-retain the full configured command. Build and typecheck stay complete. Host-check
-mode retains its exact full commands.
+retain the full configured command. Build and typecheck stay complete.
 
-The helper runs inside the same owner process tree; Runner gains no separate
-check/repair phase. Logs record the original policy and actual invocation; receipts
+The helper runs in the Runner-owned host check process tree. Failures return to
+the same implementation owner for repair. Logs record the original policy and actual invocation; receipts
 remain bound to the unchanged source and exact configured policy. Independent
 Review must inspect the selected scope and results.
 

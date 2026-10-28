@@ -105,3 +105,12 @@ published evidence.
 Resumable tool/service blockers continue the existing session on the next
 bounded invocation rather than requiring manual reauthorization. Credential,
 scope and safety boundaries retain their blocking behavior.
+
+## Host checks by default amendment (2026-10-28)
+
+Runner executes configured mandatory checks on the host for every project.
+Setup writes `runner.checkExecution: "host"`; parsing an existing configuration
+without this field defaults to host execution without rewriting the file.
+This supersedes the Flutter-only opt-in and worker-side omission behavior above.
+The Agent remains contained; only configured checks use the existing finite
+Runner action, inherited environment, receipts and process cleanup.
