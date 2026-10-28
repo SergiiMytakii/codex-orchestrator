@@ -1,5 +1,45 @@
 # Tool Usage
 
+## MCP On Demand
+
+Specialized local MCP servers, including Firebase and the standalone Node REPL,
+should stay disabled by default unless a project has an intentional scoped
+exception (for example Dart for mobile development). Remote documentation
+and service connectors do not need disabling merely to reduce local Node RAM.
+
+Maestro MCP stays disabled in chat configuration, including mobile projects.
+Keep Maestro CLI installed. Use the project's bounded QA harness; its owned
+Maestro session starts for the check and closes on exit. For a separately started
+server, record ownership and apply `$task-resource-cleanup` after the check;
+preserve another chat's or an active QA run's server.
+
+1. Establish need: use the task, relevant skill and current configuration to decide
+   whether MCP adds a required capability beyond existing tools, CLI or SDK. For
+   Firebase, ordinary coding and the application's Firebase SDK do not require
+   Firebase MCP; Firebase administration or Crashlytics inspection can justify it.
+   Confirm the specific capability before enabling a server.
+2. Enable narrowly: when needed, enable it autonomously within the user's task
+   authorization. Prefer a supported per-task/session override or scoped client;
+   verify that the required tool actually becomes available. A config edit alone
+   is not proof of connection. Do not restart the app, unload another chat, or
+   create a user-visible chat to load tools. If the current runtime cannot attach
+   it safely, use a bounded CLI/SDK equivalent where authorized; explain any
+   remaining need for the user to reload or start a chat only when it blocks work.
+3. Track changes: record the prior setting, scope and task-owned resource handles.
+   If a persistent setting must change, use the narrowest project scope and avoid
+   broad enabling in the shared global configuration. Do not overwrite concurrent
+   edits or toggle an integration another active task needs.
+4. Finish: restore only this task's temporary configuration changes, provided the
+   current value still matches what this task wrote and no other task relies on
+   it. Release task-owned clients, REPL state and servers through their supported
+   scoped close/reset/stop operations, and verify release. Apply `$task-resource-cleanup`
+   to app-managed or uncertain connections: preserve them and report the
+   limitation. Disabling future startup does not prove an existing process exited.
+
+Do not invent an MCP idle-eviction setting. Startup and tool-call timeouts are not
+idle cleanup. Do not add timer-based process killing or a stdio wrapper that exits
+and silently breaks a running chat's connection.
+
 ## Flutter Debug Sessions
 
 Local Flutter UI work always uses a platform QA skill plus the runtime ownership gate:
@@ -97,3 +137,20 @@ Do not use Context7 for:
 - facts already visible in the project
 
 If Context7 is used, keep the lookup narrow and bring back only the details needed for the active task.
+
+- Reuse documentation already returned in the current conversation when it covers
+  the same question and library version. Refresh it when version or freshness matters.
+- When the exact Context7 library ID is already known, query that ID directly;
+  resolve a library only when its identity or version is uncertain.
+- Establish the installed library version from the lockfile or package metadata
+  before a version-sensitive lookup. Use version-specific documentation when
+  available; if only another version is available, verify applicability against
+  the installed API or primary documentation before applying the result.
+- Scope each query to one unresolved question, the target version, language, and
+  platform. Request only the relevant API details and a minimal example rather
+  than a broad tutorial; retain only excerpts needed for the decision.
+- Check that returned sources and examples match the requested version and
+  platform before relying on them. A language hint alone does not establish a match.
+- If results are empty, irrelevant, for a different platform, or the lookup fails,
+  consult the library's primary documentation instead of repeating equivalent
+  queries. Retry only when a specific correctable cause has been identified.

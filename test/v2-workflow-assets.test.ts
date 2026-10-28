@@ -134,6 +134,7 @@ test('workflow packages only static target scenarios with no live execution meta
   assert.deepEqual(Object.keys(loaded.manifest.evals).sort(), [
     'skill/bug-root-cause-explainer',
     'skill/code-review',
+    'skill/codebase-design',
     'skill/diagnosing-bugs',
     'skill/grilling',
     'skill/implement',

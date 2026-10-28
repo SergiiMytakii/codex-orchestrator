@@ -23,6 +23,9 @@ COMPLETE CHILD TICKET #<id>
 WORKSPACE / BASE CHECKPOINT / SCOPE / EXCLUSIONS / PROOF / STOP / NO-GIT
 <absolute workspace, confirmed base SHA, bounded instructions>
 Use $tdd where a meaningful pre-change failure is possible; otherwise direct proof.
+Apply the Design Decisions rule in
+$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/coding-skill-routing.md#design-decisions
+before editing; preserve approved design constraints.
 
 PARENT CONTEXT — acceptance authority only
 <verbatim relevant sections with headings or anchors>

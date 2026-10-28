@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "skill": "codebase-design",
+  "cases": [
+    {
+      "id": "bounded-reference-contract",
+      "prompt": "Use the deep-module vocabulary to evaluate the named Checkout interface. No architecture scan or implementation was requested.",
+      "expected": [
+        "evaluate only the named Module Interface and Seam",
+        "keep the active driver in control"
+      ],
+      "forbidden": [
+        "start a repository-wide scan",
+        "start implementation"
+      ]
+    },
+    {
+      "id": "vocabulary-does-not-create-structure",
+      "prompt": "The client calls one account endpoint, then starts three independently owned data sources. No shared module, seam, owner, or coordinator is verified. Briefly recommend adding access to the existing account response.",
+      "expected": [
+        "describe only the verified response change and call order",
+        "keep the three data sources independent"
+      ],
+      "forbidden": [
+        "name a new module, seam, owner, coordinator, or shared flow",
+        "turn call order into a broader architecture claim"
+      ]
+    },
+    {
+      "id": "design-it-twice-independent-alternatives",
+      "prompt": "A consequential deepening candidate is selected and the user wants Design It Twice.",
+      "expected": [
+        "request three or more radically different designs through three distinct fresh explorer children in one parallel wave",
+        "compare depth, locality, and seam placement while root retains the final decision"
+      ],
+      "forbidden": [
+        "invent another role, model, effort, or provider-specific tool",
+        "label sequential inline alternatives as independent"
+      ]
+    }
+  ]
+}

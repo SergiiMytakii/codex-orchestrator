@@ -15,8 +15,8 @@ Require the complete Parent PRD, complete tickets, authoritative tracker blocker
 repository policy, bounded child scopes, and proof of the requested behavior.
 Root prepares one clean isolated integration worktree and pinned baseline for
 each repository. Root is the only integrator and Git writer. Workers perform
-no Git action. Push, PR, tracker writes, merge to the destination branch, and
-release each require separate authority.
+no Git action. Push, PR, tracker writes, and release each require separate
+authority.
 
 Every child receives a unique fresh `implementer`. The complete child ticket is
 its only executable scope; bounded Parent context is acceptance authority.

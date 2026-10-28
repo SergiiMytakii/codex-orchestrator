@@ -48,15 +48,20 @@ non-empty fresh child identity, waits for that same child to complete, checks
 the assignment inputs, and integrates only isolated output. A single ticket
 never activates the graph coordinator.
 
+Before context compaction, preserve the current diff scope, completed proof,
+active process handles, applicable constraints, and next action in the
+continuation summary. Resume from that state; reread sources only when missing,
+changed, or needed to resolve uncertainty. Do not create a separate tracking file.
+
 ## Execution
 
-1. Confirm authority, repository policy, current status, owner code, caller
-   seam, material premises, and the smallest credible proof. Verify each
-   premise against current evidence independent of the proposed implementation.
-   If a material premise is unsupported or contradicted, stop before edits and
-   return the decision or evidence gap. Read and record pre-existing changes;
-   preserve them while adding the authorized edits on top. Disjoint dirty paths
-   remain untouched and unstaged.
+1. Confirm authority, repository policy, current status, owner code, caller seam,
+   and the smallest credible proof. Record pre-existing changes and keep unrelated
+   paths untouched and unstaged. Verify material premises independently of the
+   proposed implementation; resolve unsupported or contradicted premises before edits.
+   Before editing, apply the [Design Decisions rule](../../docs/agents/coding-skill-routing.md#design-decisions)
+   in the normative coding route. Pass settled design constraints to any
+   assigned implementer.
    For UI work, load `$ui-evidence-proof` now, inspect the supplied design, and
    establish its comparison criteria before implementation.
 2. Use `$tdd` where possible. Otherwise establish direct pre-change evidence
@@ -71,60 +76,59 @@ never activates the graph coordinator.
 3. Implement the smallest complete change in the existing owner. Delete
    superseded paths in scope; do not add aliases, wrappers, adapters, fallback
    routes, or speculative layers.
-4. Run targeted proof and the smallest affected integration check.
-   For UI work, complete `$ui-evidence-proof` against the final rendered result.
-   Fix in-scope design differences and repeat capture/comparison until it passes;
-   tests or an uninspected screenshot cannot replace this completion gate.
-   During substantial work, run the relevant typecheck or single test file as
-   the seam settles. Run a full suite once at the end only when repository
-   policy, risk, or the changed shared contract makes it proportionate.
-5. Classify the settled result by content:
-   - substantial: behavior or contract beyond an obvious local edit, including
-     public API, persistence, auth/payment, concurrency/shared state, or
-     cross-module interaction;
-   - obvious local: docs, copy, formatting, mechanical config, or an obvious
-     local correction with direct proof.
-   A public returned-record shape change remains a substantial contract change
-   even when its implementation is one line or arrives through one ticket.
+4. Verify the final change:
+   - **Coverage:** run the smallest checks covering changed behavior and known
+     failure conditions. A narrower check replaces a broader run only when it
+     preserves the relevant trigger, state, and assertions; isolated CI groups
+     do not prove cross-group interactions. Run the full suite when repository
+     policy or the affected contract requires it, or narrower checks cannot cover
+     the known failure. After a repair, rerun affected checks; repeat the full
+     suite only when that reason still applies.
+   - **Reuse:** retain completed results while the checked code, fixtures,
+     configuration, and relevant runtime state remain unchanged. Rerun only for
+     affected changes, inconclusive evidence, repeatability requirements, or an
+     explicit policy gate. A commit alone does not invalidate results. Required
+     diagnosis-handoff reproduction in step 2 still applies.
+   - **UI:** complete `$ui-evidence-proof` against the final rendered result.
+     Fix in-scope differences and repeat capture/comparison until it passes;
+     tests or an uninspected screenshot cannot replace this gate.
+   - **Waiting:** retain the running check's process handle and use the tool's
+     bounded wait or continuation operation. Inspect logs on failure, unexpected
+     delay, or when needed for a decision. If status polling is the only option,
+     space polls according to expected duration. Do not launch a duplicate check
+     while the original is running.
+5. Classify the actual change, not its size or subsystem:
+   - substantial: behavior or contract changes beyond an obvious local edit,
+     including public APIs, persistence, auth/payment, concurrency/shared state,
+     or module interactions;
+   - obvious local: docs, copy, formatting, mechanical config, or a straightforward
+     correction with direct proof.
+   A returned-record shape change is substantial even when one line.
+   Test-only fixture or selector corrections may use direct proof when coverage
+   and expected behavior are preserved. Changes to accepted outcomes require
+   checking the underlying contract.
 6. For substantial work, invoke `$code-review` on the settled proof. The first
    invocation reviews the complete authorized result with one fresh Spec
    reviewer and one fresh Standards reviewer in parallel. Obvious local work
    may skip Review.
-7. Handle each reviewer result:
-   - reviewer findings are evidence, not implementation authority. Before any
-     repair, independently verify **Authority** (the existing authorized
-     obligation being restored), **Trigger** (the concrete failing path or
-     unmet requirement), **Impact** (the observable defect or proof gap in the
-     authorized result), and **Minimal repair** (the least change that restores
-     that obligation). State one short evidence-backed sentence connecting
-     those four facts before editing;
-   - classify the result without collapsing failure paths: a new obligation,
-     changed authorized outcome, ownership or architecture decision, or repair
-     of a neighboring problem is a Decision Delta and stops for authority. A
-     missing Authority, Trigger, or Impact makes the finding unverified and it
-     receives no repair; classify it as an observation unless required proof
-     cannot establish the authorized result, in which case the proof gap blocks
-     completion without authorizing code. Only a finding with all four facts
-     established is a verified blocker eligible for repair. Apply the same gate
-     to UI, backend, persistence, concurrency, infrastructure, and every other
-     change type;
-   - if optional machinery added by the current diff causes the problem,
-     remove it instead of expanding the outcome to support it;
-   - consolidate every verified blocker from the current review into one
-     repair batch. The repair may widen the investigated impact cone and touch
-     necessary neighboring files within explicit exclusions and preservation
-     boundaries, but it must not widen the authorized outcome. The active
-     owner applies it: root for direct work or the ticket's existing
-     `implementer` for single-ticket work. Do not ask for confirmation or
-     create a second implementer when the gate proves the repair is already
-     authorized.
-8. After each repair batch, rerun affected proof and invoke `$code-review` on
-   the new revision. Run only the affected lens: a Spec-only repair returns to
-   Spec, a Standards-only repair returns to Standards, and a mixed or
-   unisolatable repair returns to both lenses. Limit targeted Review to the
-   repair delta, direct impact cone, and affected proof; untouched approval
-   remains valid. Repeat until approval. Reviewer count is not a stop condition;
-   use a complete two-lens Review only when the repair cannot be isolated.
+7. For each finding, independently verify **Authority**, **Trigger**, **Impact**,
+   and **Minimal repair**. Before editing, connect the authorized obligation,
+   observed failure, impact, and smallest repair in one evidence-backed sentence.
+   - A new obligation, changed outcome, or unresolved ownership/architecture
+     decision requires authority. An independent neighboring problem is outside scope.
+   - An unsupported finding is an observation and receives no repair. Missing
+     required proof blocks completion but does not authorize speculative code.
+   - Apply verified blockers as one repair batch through the existing owner:
+     root for direct work or the ticket's existing implementer. Necessary neighboring
+     files may be included within exclusions and preservation boundaries without
+     expanding the authorized outcome. Already-authorized repairs need neither
+     another confirmation nor a second implementer.
+   - Remove optional machinery causing the defect before extending it.
+8. After a repair batch, rerun affected proof and request fresh `$code-review`
+   of the repair delta, repaired blockers, and direct impact: Spec, Standards,
+   or both as affected; mixed or unisolatable impact requires both.
+   Preserve untouched approvals. Repeat until approval; repeat complete Review
+   only when repair impact cannot be isolated. Reviewer count is not a stop condition.
 9. After proof and every applicable review approve, create one scoped local
    commit for direct and single-ticket Implement when the scope is isolatable.
    Stage only owned paths and recheck that unrelated dirty paths remain

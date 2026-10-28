@@ -65,7 +65,7 @@ baseline, checkpoint and recovery-commit SHA, final checkpoint, exact final
 range, direct Parent coverage, deterministic proof, reviewer identities and
 verdicts, skipped checks, and residual risk. This is a report, not durable
 workflow state. Reconcile tracker state only when explicitly authorized. Push,
-PR, merge, and release each require separate authority; local graph acceptance
+PR, and release each require separate authority; local graph acceptance
 grants none of them.
 
 When drafting or updating an authorized PR body, read and apply `$pr` to the

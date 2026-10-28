@@ -72,6 +72,22 @@ and the graph-only Implement Spec are internal or side primitives.
 Specialized runtime and platform skills remain side tools and do not compete
 with the main flow.
 
+## Design Decisions
+
+Within Plan or Implement, invoke
+[`$codebase-design`](../../skills/codebase-design/SKILL.md) when the authorized
+work requires choosing responsibility for meaningful new behavior, substantially
+changing what callers must know to use a module, or redistributing
+responsibility between modules.
+
+Continue without it for local corrections preserving existing responsibility
+and interface, or implementation of an already-settled design. Task size,
+file count, and the feature/bug label do not determine invocation.
+
+Reassess if inspection reveals a design decision. Keep analysis within the
+authorized scope and briefly explain the concrete reason for invocation.
+Explicit user instructions take precedence.
+
 ## PR descriptions and retrospectives
 
 When drafting or updating a PR body, read and apply `$pr` after the applicable

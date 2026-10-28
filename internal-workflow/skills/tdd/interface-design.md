@@ -1,8 +1,12 @@
 # Interface Design for Testability
 
-Good interfaces make testing natural:
+Use these options only within an already-authorized interface change.
+Preserve required side effects. Do not redesign production interfaces solely
+to simplify tests.
 
-1. **Accept dependencies, don't create them**
+Options that can make testing natural:
+
+1. **Accept external dependencies where ownership calls for injection**
 
    ```typescript
    // Testable
@@ -14,7 +18,7 @@ Good interfaces make testing natural:
    }
    ```
 
-2. **Return results, don't produce side effects**
+2. **Prefer explicit results for computations; preserve required side effects**
 
    ```typescript
    // Testable

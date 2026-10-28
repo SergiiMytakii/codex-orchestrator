@@ -3,6 +3,7 @@
   "personalSkills": [
     "bug-root-cause-explainer",
     "code-review",
+    "codebase-design",
     "diagnosing-bugs",
     "flutter-android-debug",
     "flutter-attach-session",

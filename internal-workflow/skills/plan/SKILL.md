@@ -10,86 +10,86 @@ or ownership decision gap, a request to save or review a plan, or multi-ticket
 or multi-session work that needs durable authority. A clear feature, fix, or
 local edit routes to `$implement` without a planning artifact.
 
-## Choose the smallest planning outcome
+## Choose the Smallest Planning Outcome
 
-- For a real decision gap, invoke `$grilling` only as needed to reach explicit
-  shared understanding through dependency-aware frontier rounds. Grilling owns
-  the write-free dialogue; keep the resolved decision in the current
-  conversation unless a later fresh context needs durable authority.
-- Resolve a decision gap in the current conversation when no durable handoff is
-  needed. Do not create a PRD or tickets merely to record the conversation.
-- For a compact local Markdown plan, keep the settled conversation draft as the
-  fixed base, use `$plan-review`, reconcile findings minimally, and save it.
-- Create a durable PRD only when product authority must survive the current
-  context or be consumed in a later fresh context.
+- Resolve decision gaps in the current conversation; invoke `$grilling` only
+  when needed for write-free, dependency-aware dialogue and explicit shared
+  understanding. Create no artifact unless requested or required for a durable
+  handoff. Saving a conversation does not require a PRD or tickets.
+- For a compact local Markdown plan, use the settled conversation draft as the
+  fixed base, review and reconcile it as below, then save it.
+- Create a durable PRD only when requested or when product authority must
+  survive the current context or be consumed in a later fresh context.
 - Decide whether durable executable tickets are needed. Once they are,
-  `$to-tickets` owns their count and slicing from the approved product
-  authority; Plan does not pre-size the packet from file count, technical
-  layers, or generic risk.
+  `$to-tickets` owns their count and slicing from approved product authority;
+  file count, technical layers, and generic risk do not pre-size the packet.
 
 The Parent PRD is the sole product and final-acceptance authority. Tickets are
 local executable slices; they do not duplicate that authority.
 
-## Minimum solution
+## Ground the Technical Plan
 
-Before settling a plan:
+Before settling a technical plan, inspect applicable repository policy and
+trace the relevant existing owner and caller path in code. Check affected data
+or state and existing tests or commands that can prove the intended outcome.
+Read only enough to verify material feasibility assumptions; reuse current
+source evidence already available rather than restarting discovery.
 
-1. State the direct solution through existing owners and seams.
-2. Keep only mechanisms required by user authority, repository invariants, or
-   proven failure paths.
-3. Keep agent recommendations as proposals; saving a draft is not approval.
-4. Delete any mechanism whose removal preserves required behavior and credible
-   proof.
+Before settling the technical approach, apply the [Design Decisions rule](../../docs/agents/coding-skill-routing.md#design-decisions)
+in the normative coding route.
 
-Complete when every binding mechanism has authority and demonstrated necessity.
+Ground technical claims in concrete source references, recorded once in the
+plan or review inputs as appropriate to the artifact format. Distinguish
+observed behavior, proposed changes, and unresolved assumptions. Do not present
+invented paths, APIs, ownership, or migration behavior as implementation facts.
+When code or evidence is unavailable, expose the gap or a blocking discovery
+outcome instead of declaring dependent work executable. Review checks a settled
+plan; it does not replace this discovery. This inspection authorizes no code
+changes, production mutations, or implementation experiments.
 
-Before Plan saves a settled local plan, when the user explicitly requests
-independent review, or when repository policy requires it, invoke
-`$plan-review`. Plan remains the sole composition owner; the reviewer returns
-findings only and never a rewritten plan.
+## Minimum Solution
 
-For review followed by saving, the original settled draft remains the fixed
-base. Reconcile each finding before editing:
+State the direct solution through existing owners and seams. Keep a new
+mechanism only when user authority, a repository invariant, or a proven failure
+path requires it and the direct solution cannot satisfy that obligation.
+Remove additions whose deletion preserves required behavior and credible proof.
 
-- Only verified `BLOCKER` findings may change the draft. Require Authority,
-  Trigger, Impact, and the Minimal correction already inside the approved
-  outcome.
-- Return a plan-changing `QUESTION` to the user. Do not guess its answer.
-- Do not copy `QUESTION` or `OBSERVATION` findings into it.
-- Apply verified blockers as one minimal revision that preserves the draft's
-  structure, order, and information density. Do not restate the same obligation
-  across overview, implementation, proof, and completion sections or add a new
-  section merely to make the artifact look comprehensive.
-- If a correction changes product behavior, ownership, public boundaries, or
-  the authorized outcome, stop for a decision instead of expanding the plan.
+Agent recommendations remain proposals until confirmed. Saving or publishing
+a draft is neither approval nor implementation authority.
 
-After the first full review, reconcile verified blockers in one minimal batch.
-Re-review only the blockers, changed text, and direct impact; unchanged scope
-stays settled. Repeat the full review only for a new product outcome or owner,
-or when the impact cannot be isolated. A user answer alone does not trigger it.
-Saving never turns an observation into scope or a plan into implementation
-authority.
+## Local Plan Review and Saving
 
-## Durable composition
+Before saving a settled local plan, or when explicitly requested or required
+by repository policy, invoke `$plan-review`. The reviewer returns findings;
+Plan retains composition ownership.
 
-Plan owns the composition sequence. `$to-spec` owns PRD synthesis,
-`$to-tickets` owns executable slicing and publication, and neither primitive
-repeats the other's mechanics.
+Keep the settled draft as the base. Apply verified `BLOCKER`s in one minimal
+batch, requiring Authority, Trigger, Impact, and Minimal correction within
+the authorized outcome. Preserve structure, order, and information density.
+Do not add sections or repeat obligations merely for completeness.
 
-For a requested spec-and-tickets outcome:
+Return plan-changing `QUESTION`s to the user without guessing answers or
+copying findings into the draft as requirements. `OBSERVATION`s do not become
+scope unless explicitly adopted. Corrections changing product behavior,
+ownership, public boundaries, or the authorized outcome require a decision
+before revision; unresolved choices prevent settling the affected plan.
 
-1. invoke `$to-spec` in combined mode;
-2. keep the PRD draft in the current context;
-3. pass that draft directly to `$to-tickets`;
-4. do not publish or independently review the intermediate PRD;
-5. Let `$to-tickets` own executable slicing, one fresh semantic review per
-   settled revision, one explicit user approval of the final packet, serialized
-   publication, deterministic reconciliation, and authoritative tracker
-   read-back.
-6. Stop before implementation.
+For local plans, re-review repaired blockers, changed text, and direct impact;
+unchanged scope remains settled. Repeat complete review only when the outcome
+or owner changes, or impact cannot be isolated. A user answer alone does not
+require complete review. Ticket packets follow `$to-tickets` review and
+approval rules.
 
-Requests phrased as “spec to tickets” route directly to Plan. Do not dispatch
-through an alias, wrapper, adapter, fallback, or compatibility route.
+## Durable Composition
+
+For a requested spec-and-tickets outcome, invoke `$to-spec` in combined mode
+and pass its contextual draft directly to `$to-tickets`. Do not independently
+review or publish the intermediate PRD.
+
+`$to-spec` owns PRD synthesis. `$to-tickets` owns slicing, packet review,
+exact-packet approval, serialized publication, reconciliation, and authoritative
+tracker read-back. Plan owns composition and stops before implementation.
+Requests for “spec to tickets” enter this composition directly.
 
 ## Boundaries
 
