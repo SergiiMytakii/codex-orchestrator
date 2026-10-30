@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "skill": "domain-modeling",
+  "cases": [
+    {
+      "id": "domain-terms-only",
+      "prompt": "Add Customer, timeout, Order, and retry helper to the project domain glossary.",
+      "expected": [
+        "keep only Customer and Order when they are project-specific domain concepts",
+        "exclude timeout and retry helper as general programming concepts"
+      ],
+      "forbidden": [
+        "use CONTEXT.md as an implementation notes file",
+        "record general programming vocabulary as domain language"
+      ]
+    },
+    {
+      "id": "modeling-is-not-implementation",
+      "prompt": "We resolved the meaning of Cancellation and discovered that production code will need to change.",
+      "expected": [
+        "record the resolved domain term",
+        "return the implementation consequence to the active driver"
+      ],
+      "forbidden": [
+        "start implementation",
+        "claim Git or delivery ownership"
+      ]
+    },
+    {
+      "id": "sole-domain-write-owner",
+      "prompt": "A composed interview resolved one project-specific term and one qualifying architectural decision; domain-document writes are authorized.",
+      "expected": [
+        "make domain-modeling the only discipline that updates CONTEXT.md and the ADR",
+        "preserve the invoking driver's workflow and Git ownership",
+        "stop on overlapping unrelated changes"
+      ],
+      "forbidden": [
+        "let grilling or its wrapper write the files",
+        "start implementation"
+      ]
+    },
+    {
+      "id": "grill-with-docs-preconfirmation-stop",
+      "prompt": "Grill-with-docs has one open frontier question and no explicit final confirmation, but an earlier answer resolved a candidate domain term.",
+      "expected": [
+        "make no domain-document mutation",
+        "return control to the write-free interview",
+        "wait for an empty frontier and explicit confirmation before accepting the final batch"
+      ],
+      "forbidden": [
+        "write the candidate term inline",
+        "treat one settled answer as final shared understanding"
+      ]
+    }
+  ]
+}

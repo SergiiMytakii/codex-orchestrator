@@ -74,6 +74,12 @@ with the main flow.
 
 ## Design Decisions
 
+Before designing interfaces, invoke
+[`$domain-modeling`](../../skills/domain-modeling/SKILL.md) if the task introduces
+or changes domain concepts or their relationships, or reveals ambiguity in them.
+Resolve these before settling the interface. Skip this step when the domain
+model is unchanged; new technical names alone do not require it.
+
 Within Plan or Implement, invoke
 [`$codebase-design`](../../skills/codebase-design/SKILL.md) when the authorized
 work requires choosing responsibility for meaningful new behavior, substantially

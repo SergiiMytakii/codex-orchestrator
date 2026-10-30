@@ -369,8 +369,7 @@ function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], byt
   const text = bytes.toString('utf8');
   if (Buffer.from(text, 'utf8').equals(bytes) === false) throw new Error('proof text artifact is not UTF-8');
   if (containsCredentialEvidence(text)) throw new Error('proof text artifact contains credential material');
-  const isLocalDiagnostic = !artifact.publishable && ['command-output', 'static-inspection'].includes(artifact.kind);
-  if (!isLocalDiagnostic && containsHostIdentityEvidence(text)) throw new Error('proof text artifact contains host identity material');
+  if (artifact.publishable && containsHostIdentityEvidence(text)) throw new Error('proof text artifact contains host identity material');
 }
 
 function validateAndroidRunnerReceipt(input: {

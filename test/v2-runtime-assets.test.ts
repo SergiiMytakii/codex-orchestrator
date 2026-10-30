@@ -303,7 +303,7 @@ test('legacy config owner without receipts requests host checks and receives art
   assert.match(prompt, /no credential material/u);
   assert.match(prompt, /publishable text.*64 KiB.*host identity/u);
   assert.match(prompt, /compact sanitized summaries.*actual exit codes.*SHA-256/u);
-  assert.match(prompt, /Host identity is allowed only in private command-output or static-inspection artifacts/u);
+  assert.match(prompt, /Paths and host identity are allowed in every private artifact kind; they remain forbidden in publishable text/u);
   assert.match(prompt, /Keep complete raw logs unchanged in private local diagnostics/u);
 });
 

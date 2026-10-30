@@ -125,12 +125,35 @@ test('proof summaries admit application routes and percentage ratios without adm
   }
 });
 
-test('host identity is allowed only in local diagnostic artifacts', async () => {
-  const content = Buffer.from('Configured command: /Users/example/bin/node --version\n');
-  const local = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content, artifactKind: 'static-inspection', publishable: false }) });
-  assert.equal((await local.proof.admitReport(local.input())).status, 'passed');
+test('all private text artifact kinds admit arbitrary paths while public evidence rejects host paths', async () => {
+  const kinds = ['command-output', 'static-inspection', 'generated-file', 'dom-snapshot',
+    'console-log', 'network-log', 'ui-hierarchy', 'device-log', 'lease-record'] as const;
+  const content = Buffer.from(JSON.stringify({
+    type: 'http-error', path: '/index.php', status: 503,
+    files: ['/Users/example/report.txt', '/custom/project/report.txt', '/var/log/app.log',
+      'file:///private/report.txt', String.raw`C:\Users\example\report.txt`, '~/report.txt'],
+  }));
+  for (const artifactKind of kinds) {
+    const fixture = proofFixture({ artifactContent: content,
+      report: passingReport({ artifactContent: content, artifactKind, publishable: false }) });
+    assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'passed', artifactKind);
+  }
   const published = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content }) });
   assert.equal((await published.proof.admitReport(published.input())).status, 'internal-error');
+});
+
+test('private path admission does not admit credentials or relax text integrity limits', async () => {
+  for (const artifactKind of ['command-output', 'static-inspection', 'generated-file', 'dom-snapshot',
+    'console-log', 'network-log', 'ui-hierarchy', 'device-log', 'lease-record'] as const) {
+    for (const content of [Buffer.from('/index.php password=credential-material-12345'),
+      Buffer.from('Authorization: Bearer credential-material-12345'),
+      Buffer.from('access_token=credential-material-12345'), Buffer.alloc(0), Buffer.from([0xff]),
+      Buffer.alloc(1024 * 1024 + 1, 'a')]) {
+      const fixture = proofFixture({ artifactContent: content,
+        report: passingReport({ artifactContent: content, artifactKind, publishable: false }) });
+      assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'internal-error', artifactKind);
+    }
+  }
 });
 
 test('lease cleanup pending preserves the already admitted outcome', async () => {

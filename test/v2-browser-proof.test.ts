@@ -121,6 +121,14 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
   }
 });
 
+test('browser proof admits private DOM and network paths without weakening visual evidence', async () => {
+  const result = await runPolicyFixture(({ bytes }) => {
+    bytes.set('proofs/proof-browser/desktop.dom.json', Buffer.from('{"path":"/Users/private-user/.config/tool"}\n'));
+    bytes.set('proofs/proof-browser/network.json', Buffer.from('[{"type":"http-error","path":"/index.php","status":503}]\n'));
+  });
+  assert.equal(result.status, 'passed');
+});
+
 test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and misclassified browser artifacts', async () => {
   const cases: Array<{
     name: string;
@@ -142,10 +150,6 @@ test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and m
     {
       name: 'secret-bearing console',
       mutate: ({ bytes }) => bytes.set('proofs/proof-browser/console.json', Buffer.from('{"Authorization":"Bearer secret-value-123"}\n')),
-    },
-    {
-      name: 'absolute user path in DOM',
-      mutate: ({ bytes }) => bytes.set('proofs/proof-browser/desktop.dom.json', Buffer.from('{"path":"/Users/private-user/.config/tool"}\n')),
     },
     {
       name: 'local diagnostics marked publishable',
