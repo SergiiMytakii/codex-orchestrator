@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.40] - 2026-10-30
+
 ### Fixed
 
 - Accept arbitrary path text in all private proof artifacts, including network logs, DOM snapshots and device diagnostics, while retaining credential, size, UTF-8, publication and artifact containment checks.
