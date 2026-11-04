@@ -84,6 +84,10 @@ changed, or needed to resolve uncertainty. Do not create a separate tracking fil
      policy or the affected contract requires it, or narrower checks cannot cover
      the known failure. After a repair, rerun affected checks; repeat the full
      suite only when that reason still applies.
+   - **Window Trade regression authority:** when working in Window Trade Accounting,
+     read its `ops/DEV.md` standing owner authorization for standard synthetic
+     regression runners. Apply it to necessary local and daily Orchestrator checks
+     without asking for repeated confirmation; preserve its runtime and cleanup limits.
    - **Reuse:** retain completed results while the checked code, fixtures,
      configuration, and relevant runtime state remain unchanged. Rerun only for
      affected changes, inconclusive evidence, repeatability requirements, or an

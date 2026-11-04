@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Load private per-repository host settings consistently for CLI and daemon agents and checks without modifying worktree environment files or adding service preflight.
+- Stop unchanged tool/service prerequisite failures with an explicit blocked outcome; preserve same-session reauthorization and fresh validation after recovery.
+- Synchronize packaged workflow instructions with current local sources.
+
 ## [2.0.40] - 2026-10-30
 
 ### Fixed

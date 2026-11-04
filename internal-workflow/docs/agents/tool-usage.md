@@ -1,5 +1,12 @@
 # Tool Usage
 
+## Autonomous execution
+
+Do authorized work through available tools instead of asking the user to run
+commands or collect output. If SSH fails, check provider tools or the web console.
+Request manual help only for a proven blocker; preserve existing approval and
+runtime ownership restrictions.
+
 ## MCP On Demand
 
 Specialized local MCP servers, including Firebase and the standalone Node REPL,
