@@ -222,6 +222,7 @@ test('one contained owner receives proof, independent Review, session identity, 
     assert.equal(invocation.operationPolicy.sandboxMode, 'workspace-write');
     assert.equal(invocation.operationPolicy.runnerPostcondition, 'change-set');
     assert.equal(invocation.operationPolicy.approvalCeiling, 'never');
+    assert.equal(invocation.parentEnv.RUNNER_PRIVATE_FIXTURE, 'loaded');
     assert.equal(invocation.operationPolicy.externalWrite, false);
     assert.match(invocation.prompt, /Proof artifacts belong under \.codex-orchestrator\/v2\/proofs\/proof-177\//u);
     assert.match(invocation.prompt, /Complete proof and independent Review through the packaged global skills/u);
@@ -235,6 +236,7 @@ test('one contained owner receives proof, independent Review, session identity, 
     return { kind: 'cancelled' as const };
   } };
   const agent = new ContainedImplementationAgent({
+    environment: () => ({ RUNNER_PRIVATE_FIXTURE: 'loaded' }),
     config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'),
     safePath: '/usr/bin:/bin', bootId: 'boot-a', process: process as never,
     git: { snapshot: async () => runtimeFreshness() } as never,

@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { closeSync, constants, fsyncSync, openSync, writeSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, openSync, writeSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,22 @@ export interface RunnerChecks {
 }
 
 /** Trusted local checks inherit the Runner environment without filtering keys. */
-export function buildHostCheckEnvironment(parent: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(Object.entries(parent).filter((entry): entry is [string, string] => entry[1] !== undefined));
+export function buildHostCheckEnvironment(parent: NodeJS.ProcessEnv, environmentFile?: string): Record<string, string> {
+  let configured: Record<string, string> = {};
+  if (environmentFile) {
+    let bytes: string | undefined;
+    try { bytes = readFileSync(environmentFile, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Cannot read private Runner environment'); }
+    if (bytes !== undefined) {
+      try {
+        const value: unknown = JSON.parse(bytes);
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+          || Object.entries(value).some(([key, entry]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof entry !== 'string' || entry.includes('\0'))) throw new Error();
+        configured = value as Record<string, string>;
+      } catch { throw new Error('Invalid private Runner environment: expected an object of environment strings'); }
+    }
+  }
+  return { ...configured, ...Object.fromEntries(Object.entries(parent).filter((entry): entry is [string, string] => entry[1] !== undefined)) };
 }
 
 /** Execution order is part of the configured host-check policy. */

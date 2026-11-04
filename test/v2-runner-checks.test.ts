@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -77,4 +77,20 @@ test('durable baseline evidence rejects malformed or affected failure exceptions
     assert.throws(() => validateRunnerChecks({ ...state, results: [{ ...result, baseline: { ...baseline, ...change } }] }), /baseline/);
   }
   assert.throws(() => validateRunnerChecks({ ...state, results: [{ ...result, command: 'npm test' }] }), /baseline/);
+});
+
+
+test('cold host checks load private repository settings without touching a worktree env file', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = join(root, 'environment.json');
+  await writeFile(settings, JSON.stringify({ MONGODB_URI: 'mongodb://fixture.invalid/test', DB_NAME: 'test_fixture' }), { mode: 0o600 });
+  const env = buildHostCheckEnvironment({ PATH: process.env.PATH, DB_NAME: 'test_override' }, settings);
+  const results = await runConfiguredChecks({ checks: { mongo: 'test "$MONGODB_URI" = mongodb://fixture.invalid/test && test "$DB_NAME" = test_override' },
+    worktreePath: root, logRoot: join(root, 'logs'), timeoutMs: 5000, signal: new AbortController().signal, env });
+  assert.equal(results[0]!.exitCode, 0);
+  assert.equal(await readFile(results[0]!.logPath, 'utf8'), '');
+  assert.deepEqual(buildHostCheckEnvironment({ A: 'b' }, join(root, 'absent.json')), { A: 'b' });
+  await writeFile(settings, JSON.stringify({ DB_NAME: 42 }));
+  assert.throws(() => buildHostCheckEnvironment({}, settings), /Invalid private Runner environment/);
 });

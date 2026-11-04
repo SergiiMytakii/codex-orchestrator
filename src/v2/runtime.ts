@@ -1,4 +1,4 @@
-import { runConfiguredChecks } from './runner-checks.js';
+import { runConfiguredChecks, buildHostCheckEnvironment } from './runner-checks.js';
 import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -808,6 +808,7 @@ async function publishArtifactCreateOnly(root: SafeArtifactRoot, destination: st
 export class ContainedImplementationAgent {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfig;
+    environment?: () => NodeJS.ProcessEnv;
     orchestratorHome: string;
     parentCodexHome: string;
     safePath: string;
@@ -897,7 +898,7 @@ export class ContainedImplementationAgent {
         tmpDir: attempt.tmpDir,
         safePath: this.dependencies.safePath,
         parentCodexHome: this.dependencies.parentCodexHome,
-        parentEnv: process.env,
+        parentEnv: this.dependencies.environment?.() ?? process.env,
         prompt: input.reportCorrection ? [
           reportCorrectionPrompt(input.reportCorrection),
           `Required configured checks: ${canonicalJson(config.checks)}. Correct evidence only; do not execute commands in report-only mode.`,
@@ -1079,6 +1080,7 @@ export function createV2Runtime(input: {
 }): V2Runtime {
   const targetRoot = resolve(input.targetRoot);
   const orchestratorHome = resolve(input.orchestratorHome);
+  const environment = () => buildHostCheckEnvironment(process.env, join(orchestratorHome, 'v2', sha256(targetRoot), 'environment.json'));
   const now = input.now ?? (() => new Date().toISOString());
   const controller = input.abortController ?? new AbortController();
   const underlyingExecutor = input.processExecutor ?? defaultProcessExecutor;
@@ -1132,6 +1134,7 @@ export function createV2Runtime(input: {
   });
   const implementationAgent = input.implementationAgent ?? new ContainedImplementationAgent({
     ...containedDependencies(),
+    environment,
     git,
     now,
     processExecutor: commandExecutor, iosXcrunPath,
@@ -1319,7 +1322,7 @@ export function createV2Runtime(input: {
       return runConfiguredChecks({ ...checkInput, logRoot: join(orchestratorHome, 'v2', 'runner-checks',
         sha256(canonicalJson({ repository: `${config.github.owner}/${config.github.repo}`,
           proofId: checkInput.proofId, nonce: randomUUID() }))),
-        timeoutMs: config.codex.timeoutMs, env: process.env, executor: commandExecutor });
+        timeoutMs: config.codex.timeoutMs, env: environment(), executor: commandExecutor });
     } },
     ownerLock: {
       acquire: async ({ canonicalRepository }) => {

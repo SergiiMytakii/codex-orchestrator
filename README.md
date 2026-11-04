@@ -477,3 +477,19 @@ reboot, and foreign-branch faults only in scratch runs. Success means verifying
 the exact candidate SHA, no duplicate effects, clear blocker causes, and
 detection of a known defect. This procedure does not authorize execution or
 assume that native automation or an SDK guarantees the lifecycle.
+
+## Private repository environment
+
+CLI and daemon implementation sessions and host checks load optional settings from
+`<orchestrator-home>/v2/<sha256(absolute-target-root)>/environment.json`.
+Use the same absolute target path for both entrypoints. The file is a JSON object
+of environment variable names and string values; keep it outside Git with mode
+0600. Existing process variables take precedence, including empty values.
+Missing files preserve ordinary environment inheritance. Invalid files fail with
+an error that does not include their contents. Settings are loaded at each agent
+or check invocation; there is no database connectivity preflight or service-specific
+variable requirement. Tests remain responsible for their dependencies.
+
+Provision test database settings once in this host-owned file. Do not create or
+modify protected `.env` files inside issue worktrees to repair test configuration.
+Package dependencies still require normal worktree dependency preparation.
