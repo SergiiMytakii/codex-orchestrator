@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.41] - 2026-11-04
+
 ### Fixed
 
 - Load private per-repository host settings consistently for CLI and daemon agents and checks without modifying worktree environment files or adding service preflight.
