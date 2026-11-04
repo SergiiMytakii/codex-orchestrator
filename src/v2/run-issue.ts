@@ -2697,30 +2697,24 @@ export class RunIssue {
     blocker: ExternalBlocker,
     reportSha256?: string,
   ): Promise<RunIssueResult> {
+    const outcome = implementationBlockerOutcome(blocker);
     if (blocker.resumable && ['tool', 'service'].includes(blocker.kind)) {
+      // Preserve the blocked intent before clearing the report or attempting cleanup.
+      // If cleanup fails, the next tick settles this outcome instead of relaunching work.
+      let authorizationGrantId: string | undefined;
+      try { authorizationGrantId = await this.dependencies.issues.getAuthorizationGrantId?.(
+        active.record.issueNumber, active.config.github.labels.auto.name); }
+      catch { /* The blocked outcome remains safe without a grant baseline. */ }
+      const observed = await this.observeOutcomeEvidenceEffect(active, 'blocked', canonicalJson(outcome), authorizationGrantId);
+      active = observed.active;
       if (reportSha256) {
         const changes = { implementationReportCorrection: undefined, reportRepairs: 0 };
         active = isAdoptableAttempt(active.record.activeAttempt)
           ? await this.adoptAttempt(active, reportSha256, changes) : await this.persist(active, changes);
       }
       active = await this.clearAttempt(active);
-      if (active.record.lifecycle === 'checking') {
-        if (this.dependencies.proof.cleanupMobileLeases)
-          await this.dependencies.proof.cleanupMobileLeases({ canonicalRepository: active.record.canonicalRepository,
-            worktreePath: active.record.worktreePath, proofId: active.record.proofId! });
-        const released = await this.clearAndReleaseCandidate(active, {
-          lifecycle: 'implementing', implementationResult: undefined, checkedChangeSha256: undefined,
-          proofReceipt: undefined, proofExecution: undefined, androidProofPreparation: undefined,
-          proofId: this.dependencies.createProofId(), checks: [],
-          reworkFindings: [`Recover the prerequisite and prepare fresh proof: ${blocker.summary}`],
-        });
-        if ('status' in released) return released;
-        active = released.active;
-      }
-      return this.invokedFailure(active, 'implementation-environment-retryable',
-        `Continue the same session: diagnose and recover the unavailable tool or service before completing checks, proof and Review. ${canonicalJson(blocker)}`);
     }
-    return this.terminal(active, implementationBlockerOutcome(blocker));
+    return this.terminal(active, outcome);
   }
 
   private async revoked(active: ActiveRun): Promise<RunIssueResult> {

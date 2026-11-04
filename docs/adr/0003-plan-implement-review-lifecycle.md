@@ -114,3 +114,15 @@ without this field defaults to host execution without rewriting the file.
 This supersedes the Flutter-only opt-in and worker-side omission behavior above.
 The Agent remains contained; only configured checks use the existing finite
 Runner action, inherited environment, receipts and process cleanup.
+
+## Explicit environment recovery amendment (2026-11-04)
+
+Owner-reported tool/service blockers now use the existing blocked terminal outcome,
+including those marked resumable. This supersedes automatic continuation for
+resumable tool/service blockers in the 2026-10-26 amendment: repeatedly resuming
+an unchanged missing prerequisite cannot repair it and hid waiting work behind
+`agent:running`. Runner publishes the blocker and preserves the Run, session and
+worktree. After resolving the prerequisite, removing `agent:blocked` while retaining
+`agent:auto` authorizes the existing reauthorization path and fresh validation.
+Transport/process recovery and bounded pending cleanup/notification reconciliation
+remain automatic; this adds no scheduler, retry counter or lifecycle state.

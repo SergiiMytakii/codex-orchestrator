@@ -32,7 +32,7 @@ import {
   type RunStateInspection,
 } from '../src/v2/run-store.js';
 import { hasGitHubReauthorization, LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
-import { runNeedsDaemonTick } from '../src/v2/cli.js';
+import { discoverConfiguredDaemonTick, runNeedsDaemonTick } from '../src/v2/cli.js';
 import { decodeAgentReportForValidation } from '../src/v2/report-envelope.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackRunData, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
@@ -279,36 +279,89 @@ for (const malformed of [
   });
 }
 
-test('recoverable tool and service failures continue the same owner without relabeling or a new cycle', async () => {
+test('tool and service blockers stop daemon work until the prerequisite is resolved and blocked is removed', async () => {
   for (const kind of ['tool', 'service'] as const) {
     const blocker = {
-      kind, summary: 'Local browser proof is unavailable.',
-      attempted: ['Start the isolated local browser'], resumable: true,
+      kind, summary: 'Isolated PostgreSQL fixture is unavailable.',
+      attempted: ['Initialize an isolated database; sandbox denied shared memory'], resumable: true,
     };
     const fixture = await runFixture({ fileBackedStore: true, implementationResults: [{ kind: 'completed', report: {
       version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker,
     } }] });
-    const stopped = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(stopped, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+    fixture.dependencies.outcomeEvidencePath = (runId, code, summarySha256) =>
+      `${config.runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`;
+    fixture.dependencies.issues.isReauthorized = (record, issue) => hasGitHubReauthorization({
+      targetRoot: fixture.targetRoot, config, record, issue,
+    });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    const discover = () => discoverConfiguredDaemonTick(fixture.targetRoot, {
+      readConfigBytes: async () => Buffer.from(canonicalJson(config)),
+      discover: async () => {
+        const issue = (await fixture.dependencies.issues.read(42))!;
+        return [{ ...issue, labels: issue.labels.map(name => ({ name })), comments: [], closedByPullRequestsReferences: [] }];
+      },
+      inventory: async () => (await fixture.store.read()).runs,
+      isReauthorized: (record, issue) => hasGitHubReauthorization({ targetRoot: fixture.targetRoot, config,
+        record, issue: { state: issue.state, labels: issue.labels.map(label => label.name) } }),
+      executeRun: intent => fixture.newRunner().runIssue(intent),
+    });
+    const stopped = await fixture.runner.runIssue(input);
+    assert.deepEqual(pick(stopped, ['status', 'kind', 'resumable', 'blocker']), {
+      status: 'blocked', kind: 'external', resumable: true, blocker,
+    });
     const before = (await fixture.store.read()).runs[0]!;
-    assert.equal(runNeedsDaemonTick(before), true);
-    assert.equal(before.terminalOutcome, undefined);
     assert.equal(before.activeAttempt, undefined);
-    assert.ok(fixture.evidence.some(e => e.code === 'implementation-environment-retryable' && e.summary.includes(blocker.summary)));
-    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:running']);
+    assert.equal(runNeedsDaemonTick(before), false);
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+    const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'));
+    assert.match(comment?.body ?? '', /Isolated PostgreSQL fixture is unavailable/u);
+    const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+    for (let tick = 0; tick < 3; tick++) {
+      assert.equal((await fixture.newRunner().runIssue(input)).status, 'blocked');
+      assert.equal(runNeedsDaemonTick((await fixture.store.read()).runs[0]!), false);
+      assert.deepEqual((await discover()).candidates, []);
+    }
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
     assert.equal(fixture.events.includes('git:push'), false);
-    const resumed = await fixture.newRunner().runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+    const ready = await discover();
+    assert.deepEqual(ready.candidates.map(issue => issue.number), [42]);
+    const resumed = await ready.executeRun(input);
     assert.equal(resumed.status, 'review-ready');
     const after = (await fixture.store.read()).runs[0]!;
     assert.equal(after.runId, before.runId);
     assert.equal(after.worktreePath, before.worktreePath);
-    assert.equal(after.cycle, before.cycle);
     assert.deepEqual(after.codexSession, before.codexSession);
-    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 3);
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls + 2);
   }
 });
 
-test('a recoverable blocker accepted during report correction returns the owner to ordinary execution', async () => {
+test('a prerequisite blocker survives failed terminal cleanup without relaunching its owner', async () => {
+  const blocker = { kind: 'tool' as const, summary: 'Isolated PostgreSQL is unavailable.',
+    attempted: ['Probe the isolated fixture'], resumable: true };
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'completed', report: {
+    version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker,
+  } } });
+  let cleanups = 0;
+  fixture.dependencies.proof.cleanupMobileLeases = async () => {
+    if (++cleanups <= 2) throw new Error('resource cleanup not yet confirmed');
+  };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]!.pendingEffect?.kind, 'outcome-evidence');
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'transport-failed');
+  const stopped = await fixture.newRunner().runIssue(input);
+  assert.deepEqual(pick(stopped, ['status', 'blocker']), { status: 'blocked', blocker });
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'blocked');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal(runNeedsDaemonTick((await fixture.store.read()).runs[0]!), false);
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+});
+
+test('a tool blocker accepted during report correction stops work without retaining the malformed report', async () => {
   const fixture = await runFixture({ implementationResults: [
     { kind: 'completed', report: { status: 'completed' } },
     { kind: 'completed', report: { version: 1, status: 'external-block', summary: 'Tool needs recovery',
@@ -323,9 +376,10 @@ test('a recoverable blocker accepted during report correction returns the owner 
   };
   const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
   assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
-  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
-  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
-  assert.deepEqual(modes, [false, true, false, false]);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  assert.equal((await fixture.store.read()).runs[0]!.implementationReportCorrection, undefined);
+  assert.deepEqual(modes, [false, true]);
 });
 
 test('removing blocked while keeping auto resumes the same Run and session without a new label event', async () => {
@@ -1656,9 +1710,15 @@ test('authority blocker outcome evidence replays exact detail after the terminal
   }
 });
 
-test('recoverable proof failure returns to the same owner for fresh evidence without renewed authority', async () => {
+test('proof prerequisite blockers stop retries and require fresh proof after reauthorization', async () => {
   for (const interruptRelease of [false, true]) {
-    const fixture = await runFixture();
+    const fixture = await runFixture({ fileBackedStore: true });
+    const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+    fixture.dependencies.outcomeEvidencePath = (runId, code, summarySha256) =>
+      `${config.runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`;
+    fixture.dependencies.issues.isReauthorized = (record, issue) => hasGitHubReauthorization({
+      targetRoot: fixture.targetRoot, config, record, issue,
+    });
     let proofSequence = 0;
     fixture.dependencies.createProofId = () => `recovery-proof-${++proofSequence}`;
     if (interruptRelease) {
@@ -1670,7 +1730,7 @@ test('recoverable proof failure returns to the same owner for fresh evidence wit
         return release(input);
       };
     }
-    const blocker = { kind: 'service' as const, summary: 'proof service is temporarily unavailable',
+    const blocker = { kind: 'service' as const, summary: 'proof service is unavailable',
       attempted: ['bounded status probe'], resumable: true };
     const admit = fixture.dependencies.proof.admitReport;
     let blockedProofId: string | undefined;
@@ -1681,30 +1741,33 @@ test('recoverable proof failure returns to the same owner for fresh evidence wit
         ? { status: 'external-block', blocker, receipt: receipt() }
         : result;
     };
-    const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    const deferred = await fixture.runner.runIssue(input);
+    assert.deepEqual(pick(deferred, ['status', 'resumable', 'blocker']), { status: 'blocked', resumable: true, blocker }, JSON.stringify({ deferred, evidence: fixture.evidence }));
     const paused = (await fixture.store.read()).runs[0]!;
-    assert.equal(paused.terminalOutcome, undefined);
-    assert.equal(runNeedsDaemonTick(paused), true);
-    assert.equal(paused.implementationResult, undefined);
-    assert.equal(paused.pendingEffect?.kind, interruptRelease ? 'candidate-pin-release' : undefined);
-    assert.equal(fixture.events.at(-1), 'owner-release');
-
-    const resumed = await fixture.newRunner().runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    const calls = fixture.events.filter(event => event === 'agent').length;
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+    // Bounded reconciliation may finish retaining/cleaning the old candidate, but never relaunches work.
+    for (let tick = 0; tick < 2; tick++) assert.equal((await fixture.newRunner().runIssue(input)).status, 'blocked');
+    assert.equal(fixture.events.filter(event => event === 'agent').length, calls);
+    assert.equal(runNeedsDaemonTick((await fixture.store.read()).runs[0]!), false);
+    assert.equal(fixture.events.includes('git:push'), false);
+    await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+    if (interruptRelease) assert.equal((await fixture.newRunner().runIssue(input)).status, 'transport-failed');
+    const resumed = await fixture.newRunner().runIssue(input);
     assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), events: fixture.events }));
-    assert.equal(fixture.events.filter((event) => event === 'agent').length, 3);
-    assert.equal(fixture.events.filter((event) => event === 'proof:admission').length, 2);
-    assert.equal(fixture.events.filter((event) => event === 'git:push').length, 1);
+    assert.equal(fixture.events.filter(event => event === 'proof:admission').length, 2);
+    assert.equal(fixture.events.filter(event => event === 'git:push').length, 1);
     const final = (await fixture.store.read()).runs;
     assert.equal(final.length, 1);
     assert.equal(final[0]!.runId, paused.runId);
+    assert.notEqual(final[0]!.proofId, blockedProofId);
     for (const payload of fixture.checkedChangePayloads) {
       assert.equal(payload.version, 2);
       if (payload.version !== 2) throw new Error('Expected immutable candidate proof');
       assert.equal(payload.binding.expectedHeadSha, paused.baseSha);
     }
     assert.deepEqual(final[0]!.codexSession, paused.codexSession);
-    assert.equal(final[0]!.cycle, paused.cycle);
   }
 });
 

@@ -143,7 +143,7 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
 
-Resumable tool/service blockers continue on the next ordinary invocation or daemon tick. Nonresumable external failures and credential or authority blockers require resolution and renewed GitHub authorization.
+Owner-reported tool/service blockers stop with `agent:blocked`, including resumable ones. Resolve the prerequisite, then remove `agent:blocked` while retaining `agent:auto` to resume the same Run, session and worktree. Daemon ticks do not retry unchanged environment failures.
 
 One native Codex session owns implementation, configured commands, acceptance evidence, and independent Spec and Standards Review through the synchronized global skills. Runner resumes the exact saved session UUID after process cleanup; it does not launch separate proof or Review coordinators.
 
@@ -242,20 +242,19 @@ process's stderr return resumable `transport-failed` with local evidence code
 `codex-model-capacity`. A leftover output report cannot turn that refusal into
 success. The Runner retains the same session and worktree without switching models.
 
-Owner-reported tool or service blockers with `resumable: true` retain local
-diagnostics and return a resumable continuation instead of setting `agent:blocked`.
-The next CLI invocation or ordinary daemon tick continues the same Run, session
-and worktree without consuming a semantic cycle. The owner diagnoses and recovers
-the prerequisite or changes approach using retained session context. Recoverable
-proof-admission failures return to the same owner for fresh proof and Review,
-releasing the previous candidate through existing cleanup. Nonresumable failures, missing credential authority,
-scope boundaries and safety failures retain their existing blocking behavior.
+Owner-reported tool or service blockers stop with `agent:blocked` and publish
+bounded diagnostics, even when `resumable: true`. Resumable means the same Run,
+session and worktree can continue after the prerequisite is resolved; it does not
+authorize polling the same Agent until the environment changes. Ordinary daemon
+ticks and restarts settle pending cleanup/notifications without relaunching work.
+After resolving the cause, remove `agent:blocked` while retaining `agent:auto`.
+The existing reauthorization path invalidates old check/proof receipts and requires
+fresh checks, Acceptance Proof and Review before publication.
 
-Internal failures set `agent:blocked` while retaining `agent:auto`. Ordinary daemon
-checks and restarts do not retry the unchanged failure. After resolving its cause,
-remove `agent:blocked` to resume the same Run and session. Failed label delivery
-must settle first. Transport and recoverable tool/service failures retain their
-ordinary resumable behavior.
+Transport/process failures retain their ordinary resumable reconciliation behavior.
+Internal failures, missing credential authority, scope boundaries and safety failures
+retain their existing blocking behavior. Failed label delivery must settle before
+label removal can authorize a retry.
 
 If process cleanup cannot be confirmed before launch ownership is recorded, the
 Runner blocks immediately with `implementation-launch-ownership-unconfirmed`.
