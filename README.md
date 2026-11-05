@@ -277,7 +277,7 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-or carry the trusted Flutter baseline exception below after the final source edit before required device proof, Review, and publication.
+or carry the trusted Jest or Flutter baseline evidence described below after the final source edit before required device proof, Review, and publication.
 
 In explicit host-check mode the implementation session returns `checks-request`
 after final edits. Runner runs configured commands in insertion order, stops on
@@ -287,7 +287,17 @@ changes or substituted output hashes invalidate the results. A crash during host
 execution leaves an unfinished action rather than rerunning commands automatically.
 The existing owned-command fence protects unresolved process groups.
 
-Host npm checks use conservative related Jest selection.
+Host npm checks use conservative related Jest selection. For a supported full
+Jest check, Runner can admit identical assertion failures confirmed on the
+archived base. Every changed source file must have passing related suites, and
+every suite identified by the candidate or base dependency graph must pass on
+the candidate. Runner also traces reproducible failing suites on both trees to
+detect changed files loaded through computed imports and declines the exception
+when those suites use identifiable filesystem or subprocess dependencies.
+Runner installs the base lockfile offline with npm lifecycle scripts disabled. Missing coverage, incomplete reports, changed failures,
+snapshot failures, coverage collection and unsupported hooks keep the failed
+check blocking. A refusal retains the failed check, the reason and the next
+action, with private details in the local check logs.
 For ordinary full `flutter test` / `flutter test --no-pub` commands, Runner adds
 `--machine` to retain structured outcomes. When only Dart files under `lib/` and
 `test/` changed, a failed suite may be nonblocking only after Runner reproduces

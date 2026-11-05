@@ -3,15 +3,7 @@ import { posix, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson, sha256 } from './containment.js';
 import { CommandProcessQuiescenceError } from './adapters/command.js';
-import type { RunnerCheckResult } from './runner-checks.js';
-
-export interface FlutterBaselineEvidence {
-  baseSha: string;
-  logPath: string;
-  outputSha256: string;
-  affectedTests: string[];
-  failures: Array<{ test: string; errorSha256: string }>;
-}
+import type { RunnerCheckResult, TestBaselineEvidence } from './runner-checks.js';
 
 type LoggedCommand = (command: string, cwd: string, label: string) => Promise<RunnerCheckResult>;
 
@@ -24,7 +16,7 @@ export function flutterTestCommand(command: string): { sdk: string; machine: str
 /** Confirm unchanged test failures on an immutable base while requiring passing coverage for changed Dart code. */
 export async function confirmFlutterBaseline(input: {
   command: string; candidate: RunnerCheckResult; baseSha: string; worktreePath: string; logRoot: string; run: LoggedCommand;
-}): Promise<FlutterBaselineEvidence | undefined> {
+}): Promise<TestBaselineEvidence | undefined> {
   const sdk = flutterTestCommand(input.command);
   if (!sdk || input.candidate.exitCode !== 1 || !/^[a-f0-9]{40}$/u.test(input.baseSha)) return;
   const baseline = join(input.logRoot, 'baseline');

@@ -4,10 +4,21 @@ import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { confirmFlutterBaseline, flutterTestCommand, type FlutterBaselineEvidence } from './flutter-host-checks.js';
+import { confirmFlutterBaseline, flutterTestCommand } from './flutter-host-checks.js';
+
+import { jestCommand, npmTestScript } from './jest-command.js';
+import { confirmJestBaseline, jestEvidencePath, validJestDiagnostic, type JestBaselineEvidence, type JestDiagnostic } from './jest-host-checks.js';
 
 import { canonicalJson, sha256 } from './containment.js';
 import { CommandProcessQuiescenceError, defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
+
+export interface TestBaselineEvidence {
+  baseSha: string;
+  logPath: string;
+  outputSha256: string;
+  affectedTests: string[];
+  failures: Array<{ test: string; errorSha256: string }>;
+}
 
 export interface RunnerCheckResult {
   id: string;
@@ -15,7 +26,8 @@ export interface RunnerCheckResult {
   exitCode: number;
   outputSha256: string;
   logPath: string;
-  baseline?: FlutterBaselineEvidence;
+  baseline?: TestBaselineEvidence | JestBaselineEvidence;
+  jestDiagnostic?: JestDiagnostic;
 }
 
 export interface RunnerChecks {
@@ -49,14 +61,15 @@ export function runnerCheckPolicySha256(checks: Record<string, string>): string 
   return sha256(canonicalJson(Object.entries(checks)));
 }
 
-/** A confirmed unchanged, unrelated Flutter failure is admissible without hiding its exit status. */
+/** A confirmed unchanged, unrelated test failure is admissible without hiding its exit status. */
 export function runnerCheckAccepted(result: RunnerCheckResult, baseSha?: string): boolean {
   return result.exitCode === 0 || (result.exitCode === 1 && !!baseSha
-    && result.baseline?.baseSha === baseSha && !!flutterTestCommand(result.command)
+    && result.baseline?.baseSha === baseSha
+    && ('kind' in result.baseline ? result.baseline.kind === 'jest' && !!npmTestScript(result.command) : !!flutterTestCommand(result.command))
     && result.baseline.affectedTests.length > 0 && result.baseline.failures.length > 0);
 }
 
-/** Execute trusted commands sequentially; only baseline-confirmed unrelated Flutter failures may continue. */
+/** Execute trusted commands sequentially; only baseline-confirmed unrelated test failures may continue. */
 export async function runConfiguredChecks(input: {
   checks: Record<string, string>;
   worktreePath: string;
@@ -69,8 +82,9 @@ export async function runConfiguredChecks(input: {
 }): Promise<RunnerCheckResult[]> {
   await mkdir(input.logRoot, { recursive: true, mode: 0o700 });
   const results: RunnerCheckResult[] = [];
+  const incompleteLogs = new Set<string>();
   let sequence = 0;
-  const execute = async (command: string, cwd: string, label: string): Promise<RunnerCheckResult> => {
+  const execute = async (command: string, cwd: string, label: string, timeoutMs = input.timeoutMs): Promise<RunnerCheckResult> => {
     if (input.signal.aborted) throw new Error('Configured checks cancelled before launch.');
     const logPath = join(input.logRoot, `${sequence++}-${label.replace(/[^a-zA-Z0-9_-]/gu, '_').slice(0, 60)}.log`);
     const fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -87,7 +101,7 @@ export async function runConfiguredChecks(input: {
     try {
       const result = await (input.executor ?? defaultProcessExecutor)('/bin/sh', ['-c', command], {
         cwd, env: buildHostCheckEnvironment(input.env),
-        timeoutMs: input.timeoutMs, signal: input.signal, processGroup: true, maxOutputBytes: 64 * 1024 * 1024,
+        timeoutMs, signal: input.signal, processGroup: true, maxOutputBytes: 64 * 1024 * 1024,
         onStdoutBytes: capture, onStderrBytes: capture,
       });
       exitCode = result.exitCode;
@@ -96,6 +110,7 @@ export async function runConfiguredChecks(input: {
       // An unresolved owned group remains fenced; a model cannot admit its output.
       if (error instanceof CommandProcessQuiescenceError) throw error;
       capture(Buffer.from(`\nRunner: check did not complete; retained output may be incomplete. ${error instanceof Error ? error.message : 'Command execution failed.'}\n`));
+      incompleteLogs.add(logPath);
       exitCode = 1;
     } finally { try { fsyncSync(fd); } finally { closeSync(fd); } }
     return { id: label, command, exitCode, outputSha256: hash.digest('hex'), logPath };
@@ -103,14 +118,41 @@ export async function runConfiguredChecks(input: {
   for (const [id, command] of Object.entries(input.checks)) {
     const flutter = input.baseSha ? flutterTestCommand(command) : undefined;
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-    const ownerCheck = input.baseSha && /^[a-f0-9]{40}$/u.test(input.baseSha) && /^npm (?:test|run [A-Za-z0-9_:-]+)(?: |$)/u.test(command)
-      ? `${quote(process.execPath)} ${quote(fileURLToPath(new URL('./candidate-check.js', import.meta.url)))} ${input.baseSha} ${quote(command)}` : command;
+    const baseSha = input.baseSha && /^[a-f0-9]{40}$/u.test(input.baseSha) ? input.baseSha : undefined;
+    const checkDirectory = join(input.logRoot, `jest-${sequence}`);
+    let reportPath: string | undefined;
+    if (baseSha && npmTestScript(command)) {
+      try {
+        if (jestCommand(input.worktreePath, command)) reportPath = join(checkDirectory, 'candidate-jest.json');
+      } catch { /* Invalid metadata retains the full command without instrumentation. */ }
+      if (reportPath) await mkdir(checkDirectory, { mode: 0o700 });
+    }
+    const ownerCheck = baseSha && /^npm (?:test|run [A-Za-z0-9_:-]+)(?: |$)/u.test(command)
+      ? `${quote(process.execPath)} ${quote(fileURLToPath(new URL('./candidate-check.js', import.meta.url)))} ${baseSha} ${quote(command)}${reportPath ? ` ${quote(reportPath)}` : ''}` : command;
     const result = await execute(flutter?.machine ?? ownerCheck, input.worktreePath, id);
     result.command = command;
     if (flutter && result.exitCode === 1) {
       result.baseline = await confirmFlutterBaseline({ command, candidate: result, baseSha: input.baseSha!,
         worktreePath: input.worktreePath, logRoot: input.logRoot, run: execute });
       if (!result.baseline) delete result.baseline;
+    } else if (reportPath && incompleteLogs.has(result.logPath)) {
+      result.jestDiagnostic = { code: 'candidate-execution' };
+    } else if (baseSha && reportPath && result.exitCode === 1) {
+      const deadline = performance.now() + input.timeoutMs;
+      let expired = false;
+      const comparison = await confirmJestBaseline({ command, reportPath, baseSha, worktreePath: input.worktreePath,
+        logRoot: checkDirectory, run: async (probe, cwd, label) => {
+          const remaining = Math.ceil(deadline - performance.now());
+          if (remaining <= 0) {
+            expired = true;
+            throw new Error('Jest baseline comparison timed out.');
+          }
+          const result = await execute(probe, cwd, label, remaining);
+          expired ||= result.exitCode === 124;
+          if (incompleteLogs.has(result.logPath)) throw new Error('Jest comparison command did not complete.');
+          return result;
+        } });
+      Object.assign(result, expired ? { jestDiagnostic: { code: 'comparison-timeout' } } : comparison);
     }
     results.push(result);
     if (!runnerCheckAccepted(result, input.baseSha)) break;
@@ -130,24 +172,34 @@ export function validateRunnerChecks(value: unknown): asserts value is RunnerChe
   const ids = new Set();
   for (const result of r.results) {
     if (!result || typeof result !== 'object'
-      || Object.keys(result).filter(key => key !== 'baseline').sort().join(',') !== 'command,exitCode,id,logPath,outputSha256'
+      || Object.keys(result).filter(key => key !== 'baseline' && key !== 'jestDiagnostic').sort().join(',') !== 'command,exitCode,id,logPath,outputSha256'
       || typeof result.id !== 'string' || !result.id || ids.has(result.id)
       || typeof result.command !== 'string' || !result.command
       || !Number.isInteger(result.exitCode) || result.exitCode < 0 || result.exitCode > 255
       || typeof result.logPath !== 'string' || !result.logPath.startsWith('/')
       || !/^[0-9a-f]{64}$/.test(result.outputSha256)) throw new Error('runnerChecks result is invalid');
+    if ('jestDiagnostic' in result && (result.exitCode !== 1 || !npmTestScript(result.command)
+      || 'baseline' in result || !validJestDiagnostic(result.jestDiagnostic))) throw new Error('runnerChecks Jest diagnostic is invalid');
     if ('baseline' in result) {
       const b = result.baseline;
-      if (result.exitCode !== 1 || !flutterTestCommand(result.command) || !b || typeof b !== 'object' || Object.keys(b).sort().join(',') !== 'affectedTests,baseSha,failures,logPath,outputSha256'
+      if (!b || typeof b !== 'object') throw new Error('runnerChecks baseline is invalid');
+      const jest = b.kind === 'jest';
+      const validFile = (file: unknown) => jest ? jestEvidencePath(file) : typeof file === 'string'
+        && posix.normalize(file) === file && /^test\/.*_test\.dart$/u.test(file);
+      if (Object.keys(b).sort().join(',') !== (jest ? 'affectedTests,baseSha,failures,kind,logPath,outputSha256' : 'affectedTests,baseSha,failures,logPath,outputSha256')
         || !/^[a-f0-9]{40}$/.test(b.baseSha) || typeof b.logPath !== 'string' || !b.logPath.startsWith('/')
         || !/^[a-f0-9]{64}$/.test(b.outputSha256) || !Array.isArray(b.affectedTests) || !b.affectedTests.length
-        || b.affectedTests.some((file: unknown) => typeof file !== 'string' || posix.normalize(file) !== file || !/^test\/.*_test\.dart$/.test(file))
-        || !Array.isArray(b.failures) || !b.failures.length || b.failures.some((f: any) => !f
-          || Object.keys(f).sort().join(',') !== 'errorSha256,test' || typeof f.test !== 'string' || !f.test
-          || !/^[a-f0-9]{64}$/.test(f.errorSha256))
+        || b.affectedTests.some((file: unknown) => !validFile(file))
+        || !Array.isArray(b.failures) || !b.failures.length || b.failures.some((failure: unknown) => {
+          if (!failure || typeof failure !== 'object') return true;
+          const f = failure as Record<string, unknown>;
+          if (Object.keys(f).sort().join(',') !== 'errorSha256,test' || typeof f.test !== 'string'
+            || typeof f.errorSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(f.errorSha256)) return true;
+          const separator = f.test.indexOf(' :: ');
+          const file = f.test.slice(0, separator);
+          return separator < 0 || !f.test.slice(separator + 4).trim() || !validFile(file) || b.affectedTests.includes(file);
+        })
         || b.logPath === result.logPath || new Set(b.affectedTests).size !== b.affectedTests.length
-        || b.failures.some((f: any) => !/^test\/.*_test\.dart :: /u.test(f.test)
-          || b.affectedTests.includes(f.test.split(' :: ')[0]))
         || !runnerCheckAccepted(result, b.baseSha)) throw new Error('runnerChecks baseline is invalid');
     }
     ids.add(result.id);

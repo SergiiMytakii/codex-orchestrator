@@ -56,16 +56,65 @@ test('host checks run before proof and resume the same owner with trusted receip
   assert.deepEqual((await fixture.store.read()).runs[0]!.codexSession, requested.codexSession);
 });
 
-for (const wrongBase of [false, true]) {
-  test(`host completion ${wrongBase ? 'rejects stale' : 'admits confirmed unrelated'} Flutter baseline evidence`, async () => {
-    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'flutter test --no-pub' },
+test('blocked terminal reports the last host failure separately from a private blocker reason', async () => {
+  const summary = 'Expected /abort/i; see /Users/private/0-test.log.';
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'exit 9' },
+    implementationResults: [
+      { kind: 'completed', report: { version: 1, status: 'checks-request',
+        summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } },
+      { kind: 'completed', report: { version: 1, status: 'external-block',
+        summary, changedFiles: [], residualRisks: [], blocker: {
+          kind: 'out-of-scope', summary, attempted: ['Read the check output'], resumable: false,
+        } } },
+    ] });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'))?.body ?? '';
+  assert.match(comment, /Kind: out-of-scope/u);
+  assert.match(comment, /## Reason\nReason: .*detailed reason was withheld/u);
+  assert.match(comment, /## Retained work and state\n- Last recorded host check failure: "test" exit code 9/u);
+  assert.match(comment, /## Next action\nProvide the missing decision or authority/u);
+  assert.match(comment, /Inspect the retained Runner check log/u);
+  assert.doesNotMatch(comment, /Users\/private|Terminal summary is unavailable/u);
+});
+
+for (const unsafePath of [false, true]) {
+  test(`blocked issue explains Jest refusal without publishing ${unsafePath ? 'sensitive filenames' : 'private logs'}`, async () => {
+    const summary = 'The required check failed. See /Users/private/test.log.';
+    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'npm test' },
+      implementationResults: [
+        { kind: 'completed', report: { version: 1, status: 'checks-request',
+          summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } },
+        { kind: 'completed', report: { version: 1, status: 'external-block',
+          summary, changedFiles: [], residualRisks: [], blocker: {
+            kind: 'out-of-scope', summary, attempted: ['Read Jest evidence'], resumable: false,
+          } } },
+      ] });
+    fixture.dependencies.configuredChecks!.run = async () => [{
+      id: 'test', command: 'npm test', exitCode: 1, outputSha256: sha256('Jest failure'), logPath: '/private/test.log',
+      jestDiagnostic: { code: 'uncovered-source', file: unsafePath ? 'src/ghp_0123456789abcdefghijklmnopqrstuvwxyz.ts' : 'src/scraper/feature.ts' },
+    }];
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+    assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+    const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'))?.body ?? '';
+    assert.match(comment, /Jest found no related tests.*Add coverage or configure a Jest project/u);
+    if (!unsafePath) assert.match(comment, /src\/scraper\/feature.ts/u);
+    assert.doesNotMatch(comment, /ghp_0123456789|Users\/private|Terminal summary is unavailable/u);
+  });
+}
+
+for (const framework of ['Jest', 'Flutter'] as const) for (const wrongBase of [false, true]) {
+  test(`host completion ${wrongBase ? 'rejects stale' : 'admits confirmed unrelated'} ${framework} baseline evidence`, async () => {
+    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: framework === 'Jest' ? 'npm test' : 'flutter test --no-pub' },
       implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request',
         summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } }] });
     fixture.dependencies.configuredChecks!.run = async input => [{ id: 'test', command: input.checks.test!,
       exitCode: 1, outputSha256: sha256('candidate failure'), logPath: '/private/candidate.log',
-      baseline: { baseSha: wrongBase ? 'a'.repeat(40) : input.baseSha, logPath: '/private/base.log',
-        outputSha256: sha256('baseline failure'), affectedTests: ['test/changed_test.dart'],
-        failures: [{ test: 'test/unrelated_test.dart :: old failure', errorSha256: sha256('same failure') }] } }];
+      baseline: { ...(framework === 'Jest' ? { kind: 'jest' as const } : {}), baseSha: wrongBase ? 'a'.repeat(40) : input.baseSha, logPath: '/private/base.log',
+        outputSha256: sha256('baseline failure'), affectedTests: [framework === 'Jest' ? 'src/changed.test.ts' : 'test/changed_test.dart'],
+        failures: [{ test: framework === 'Jest' ? 'src/unrelated.test.ts :: old failure' : 'test/unrelated_test.dart :: old failure', errorSha256: sha256('same failure') }] } }];
     const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
     assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
     assert.equal((await fixture.runner.runIssue(input)).status, wrongBase ? 'blocked' : 'review-ready');

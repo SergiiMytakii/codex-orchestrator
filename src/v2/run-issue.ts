@@ -1,3 +1,4 @@
+import { jestDiagnosticText } from './jest-host-checks.js';
 import { runnerCheckAccepted, runnerCheckPolicySha256, type RunnerCheckResult } from './runner-checks.js';
 import { dirname, resolve } from 'node:path';
 
@@ -3212,6 +3213,17 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
       : outcome.status === 'cancelled'
         ? 'The run was cancelled before completion.'
         : record.implementationResult?.summary ?? record.proofReceipt?.summary ?? 'The authorized implementation is ready for review.';
+  const failedCheck = outcome.status === 'blocked' && record.runnerChecks?.status === 'complete'
+    ? record.runnerChecks.results.find(result => !runnerCheckAccepted(result, record.baseSha))
+    : undefined;
+  const checkId = failedCheck ? publicTerminalText(failedCheck.id, '', 100) : '';
+  const jestDiagnostic = failedCheck?.jestDiagnostic;
+  const [jestReason, jestNextAction] = jestDiagnostic ? jestDiagnosticText(jestDiagnostic) : [];
+  const jestFile = jestDiagnostic?.file && /^[\w./-]+$/u.test(jestDiagnostic.file)
+    ? publicTerminalText(` (${jestDiagnostic.file})`, '', 500) : '';
+  const fallbackSummary = outcome.status !== 'blocked'
+    ? 'Terminal summary is unavailable.'
+    : `${diagnostic.summary} The detailed reason was withheld from publication. (Code: ${code})`;
   const nextAction = outcome.status === 'review-ready'
     ? 'Review the draft PR. To request an in-scope follow-up, comment on this issue.'
     : outcome.status === 'blocked'
@@ -3226,9 +3238,10 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
   return {
     version: 1,
     outcome: outcome.status,
-    summary: publicTerminalText(summary, 'Terminal summary is unavailable.'),
+    summary: publicTerminalText(summary, fallbackSummary),
     ...(outcome.status === 'review-ready' ? { pullRequestUrl: outcome.pullRequestUrl } : {}),
     retainedWork: [
+      ...(failedCheck ? [`Last recorded host check failure: ${checkId ? `"${checkId}" ` : ''}exit code ${failedCheck.exitCode}. ${jestReason ? `${jestReason}${jestFile ? ` ${jestFile}` : ''} ${jestNextAction}` : 'Inspect the retained Runner check log for details.'}`] : []),
       ...(record.implementationResult ? [publicTerminalText(
         `Implementation report retained: ${record.implementationResult.summary}`, 'Implementation report retained; its detail was redacted.',
       )] : []),
@@ -3268,6 +3281,7 @@ function blockedDiagnostic(code: string, record: RunRecord): { summary: string; 
     'implementation-head-drift': 'The implementation changed the worktree Git HEAD. The Runner cannot attribute those commits to its authorized candidate.',
     'candidate-pin-missing': 'The saved Git reference for the exact candidate is missing. Previous checks cannot establish the identity of the remaining files.',
     'candidate-pin-diverged': 'The saved Git reference points to a different candidate. Previous checks and proof cannot authorize publication of that version.',
+    'runner-checks-evidence-mismatch': 'The Runner lacks passing or confirmed baseline evidence for the current source and required checks.',
     'configured-check-policy-drift': 'The configured checks changed after validation started; the recorded results no longer match the required check policy.',
     'candidate-check-launch-ownership-required': 'The check adapter cannot record ownership of its process, so the Runner cannot safely track completion or recovery.',
     'checked-change-candidate-binding-drift': 'The checked change does not match the frozen Git candidate. Its check results cannot authorize proof or publication.',
