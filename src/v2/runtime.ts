@@ -974,7 +974,7 @@ export class ContainedImplementationAgent {
         return { kind: 'internal-error' };
       }
       unresolvedProcess = true;
-      return { kind: 'safe-halt' };
+      return { kind: 'safe-halt', reason: error.message };
     } finally {
       if (correctionView && !unresolvedProcess) await rm(correctionView, { recursive: true, force: true });
     }

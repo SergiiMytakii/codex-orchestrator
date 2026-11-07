@@ -14,6 +14,7 @@ import {
 } from '../src/v2/runtime.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
+import { ProcessQuiescenceError } from '../src/v2/codex-process.js';
 import {
   extractContainedWorkflowReferences,
   materializeWorkflowGeneration,
@@ -258,6 +259,22 @@ test('one contained owner receives proof, independent Review, session identity, 
   if (recovered.kind !== 'completed') assert.fail('Expected exact persisted owner report recovery');
   assert.deepEqual(recovered.reportBytes, reportBytes);
   assert.equal(processRuns, 1);
+});
+
+test('contained owner preserves the concrete process barrier reason on safe halt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-quiescence-'));
+  const worktree = join(root, 'worktree'); await mkdir(worktree);
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot, runtimeRoot: root, packageVersion: '2.0.1', bootId: 'boot-a',
+  });
+  for (const reason of ['process group absence could not be confirmed', 'process stream closure could not be confirmed']) {
+    const agent = new ContainedImplementationAgent({ config: androidConfigFixture, orchestratorHome: root,
+      parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', bootId: 'boot-a',
+      process: { run: async () => { throw new ProcessQuiescenceError(reason, { pid: 123, processGroupId: 123 } as never); } } as never,
+      git: { snapshot: async () => runtimeFreshness() } as never });
+    const result = await agent.run({ ...ownerInput(worktree, workflowGeneration), attemptId: reason.startsWith('process group') ? 'group-halt' : 'stream-halt' });
+    assert.deepEqual(result, { kind: 'safe-halt', reason });
+  }
 });
 
 test('host owner receives the same trusted baseline exception enforced by completion', async () => {

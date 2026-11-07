@@ -2487,16 +2487,24 @@ test('unconfirmed pre-launch cleanup blocks immediately without claiming restart
 
 test('safe-halt returns after one tick, preserves attempt identity, and retries without semantic spend', async () => {
   const fixture = await runFixture({
-    implementationResult: { kind: 'safe-halt' },
+    fileBackedStore: true,
+    implementationResult: { kind: 'safe-halt', reason: 'process stream closure could not be confirmed' },
+    initialLabels: ['agent:auto', 'manual:keep'],
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const frozen = (await fixture.store.read()).runs[0]!;
+  assert.equal(fixture.events.at(-1), 'owner-release');
   assert.equal(frozen.lifecycle, 'safe-halt');
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked', 'manual:keep']);
+  const notice = (await fixture.dependencies.issues.read(42))!.comments.find(comment => comment.body.includes('process stream closure could not be confirmed'));
+  assert.ok(notice, 'GitHub must show the concrete safe-halt reason');
+  assert.match(notice.body, /resumable|resume/iu);
+  assert.equal(frozen.terminalOutcome, undefined, 'safe halt must remain automatically resumable');
   assert.equal(frozen.activeAttempt?.stage, 'launched');
   const attemptId = frozen.activeAttempt?.attemptId;
   assert.equal(frozen.cycle, 1);
-  assert.equal(fixture.events.at(-1), 'owner-release');
+  assert.equal(runNeedsDaemonTick(frozen), true);
   assert.equal(fixture.events.includes('git:push'), false);
 
   let observations = 0;
@@ -2519,6 +2527,112 @@ test('safe-halt returns after one tick, preserves attempt identity, and retries 
   assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), events: fixture.events }));
   assert.equal(observations, 2);
   assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
+});
+
+test('safe-halt notifications retry failed delivery on restart without relaunching a live attempt', async () => {
+  for (const failedEffect of ['comment', 'labels'] as const) {
+    const fixture = await runFixture({ fileBackedStore: true, rejectEffect: failedEffect,
+      implementationResult: { kind: 'safe-halt', reason: 'process group absence could not be confirmed' } });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    await fixture.runner.runIssue(input);
+    const before = (await fixture.store.read()).runs[0]!;
+    fixture.dependencies.processIdentity.observe = async () => ({ leader: 'same', group: 'live' });
+    const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+    const result = await fixture.newRunner().runIssue(input);
+    assert.equal(result.status, 'transport-failed');
+    assert.equal('resumable' in result && result.resumable, true);
+    const after = (await fixture.store.read()).runs[0]!;
+    assert.equal(after.runId, before.runId);
+    assert.equal(after.activeAttempt?.attemptId, before.activeAttempt?.attemptId);
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+    const issue = (await fixture.dependencies.issues.read(42))!;
+    assert.deepEqual(issue.labels, ['agent:auto', 'agent:blocked']);
+    assert.equal(issue.comments.filter(comment => comment.body.includes('process group absence could not be confirmed')).length, 1);
+  }
+});
+
+test('safe-halt reactivation survives an interrupted label write without a second live implementation', async () => {
+  for (const delivered of [false, true]) {
+    const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'safe-halt' } });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    await fixture.runner.runIssue(input);
+    const halted = (await fixture.store.read()).runs[0]!;
+    await rm(halted.activeAttempt!.resultPath, { force: true });
+    const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+    const setLabels = fixture.dependencies.issues.setLabels;
+    let interrupt = true;
+    fixture.dependencies.issues.setLabels = async (number, labels) => {
+      if (interrupt && labels.includes('agent:running')) {
+        interrupt = false;
+        if (delivered) await setLabels(number, labels);
+        throw new Error('label response lost');
+      }
+      return setLabels(number, labels);
+    };
+    const interrupted = await fixture.newRunner().runIssue(input);
+    assert.equal(interrupted.status, 'transport-failed');
+    const pending = (await fixture.store.read()).runs[0]!;
+    assert.equal(pending.pendingEffect?.kind, 'claim-labels');
+    assert.equal(pending.activeAttempt?.attemptId, halted.activeAttempt?.attemptId);
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+    fixture.options.implementationResult = undefined;
+    const resumed = await fixture.newRunner().runIssue(input);
+    assert.equal(resumed.status, 'review-ready', JSON.stringify({ delivered, resumed, evidence: fixture.evidence }));
+    const after = (await fixture.store.read()).runs[0]!;
+    assert.equal(after.runId, halted.runId);
+    assert.equal(after.cycle, halted.cycle);
+    assert.deepEqual(after.codexSession, halted.codexSession);
+  }
+});
+
+test('legacy safe-halt records acquire a resumable blocked notice without replacing the live attempt', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, permanentlyRejectEffect: 'comment',
+    implementationResult: { kind: 'safe-halt' } });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  const state = await fixture.store.read();
+  const prior = state.runs[0]!;
+  const { terminalNotifications: _notice, ...legacy } = prior;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: [legacy] });
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto', 'agent:running']);
+  fixture.options.permanentlyRejectEffect = undefined;
+  fixture.dependencies.processIdentity.observe = async () => ({ leader: 'same', group: 'live' });
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  const result = await fixture.newRunner().runIssue(input);
+  assert.equal('resumable' in result && result.resumable, true);
+  const issue = (await fixture.dependencies.issues.read(42))!;
+  assert.deepEqual(issue.labels, ['agent:auto', 'agent:blocked']);
+  assert.ok(issue.comments.some(comment => comment.body.includes('original detailed reason was not retained')));
+  assert.equal((await fixture.store.read()).runs[0]!.activeAttempt?.attemptId, prior.activeAttempt?.attemptId);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+});
+
+test('successive safe halts and a terminal blocker expose distinct reasons in the same cycle', async () => {
+  const reasons = ['process group absence could not be confirmed', 'process stream closure could not be confirmed'];
+  const fixture = await runFixture({ fileBackedStore: true,
+    implementationResults: reasons.map(reason => ({ kind: 'safe-halt' as const, reason })) });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  const first = (await fixture.store.read()).runs[0]!;
+  fixture.dependencies.createRunId = () => '00000000-0000-4000-8000-000000000002';
+  await rm(first.activeAttempt!.resultPath, { force: true });
+  await fixture.newRunner().runIssue(input);
+  const second = (await fixture.store.read()).runs[0]!;
+  assert.notEqual(second.activeAttempt?.attemptId, first.activeAttempt?.attemptId);
+  assert.equal(second.runId, first.runId);
+  assert.equal(second.cycle, first.cycle);
+  assert.deepEqual(second.codexSession, first.codexSession);
+  let comments = (await fixture.dependencies.issues.read(42))!.comments;
+  for (const reason of reasons) assert.equal(comments.filter(comment => comment.body.includes(reason)).length, 1);
+  await rm(second.activeAttempt!.resultPath, { force: true });
+  fixture.options.implementationResult = { kind: 'completed', report: { version: 1, status: 'external-block',
+    summary: 'Owner decision required', changedFiles: [], residualRisks: [],
+    blocker: { kind: 'decision-delta', summary: 'Owner decision required', attempted: ['Read criteria'], resumable: false } } };
+  const terminal = await fixture.newRunner().runIssue(input);
+  assert.equal(terminal.status, 'blocked');
+  comments = (await fixture.dependencies.issues.read(42))!.comments;
+  assert.equal(comments.filter(comment => comment.body.includes('Owner decision required')).length, 1);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, first.cycle);
 });
 
 test('safe-halt observation failure is bounded and exact result adoption prevents replacement', async () => {

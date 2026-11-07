@@ -161,7 +161,7 @@ export type ImplementationAgentResult =
   | { kind: 'transport-failed'; resumable: boolean; failure?: ProofProcessFailure }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
-  | { kind: 'safe-halt' };
+  | { kind: 'safe-halt'; reason?: string };
 
 export interface AttemptCleanupIdentity {
   runId: string;
@@ -350,7 +350,9 @@ export class RunIssue {
     if (claimLabelProjectionSettled(observation.labels, config) && !active.record.pendingEffect) return { active };
     const labels = new Set(observation.labels);
     if (!labels.has(config.github.labels.auto.name)
-      || labels.has(config.github.labels.blocked.name)
+      || (labels.has(config.github.labels.blocked.name) && !(active.record.lifecycle === 'safe-halt'
+        && active.record.terminalNotifications?.report.blocker?.resumable === true
+        && active.record.activeAttempt?.stage === 'observed' && active.record.activeAttempt.cleanup === 'confirmed'))
       || labels.has(config.github.labels.review.name)) {
       return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
     }
@@ -1304,6 +1306,12 @@ export class RunIssue {
             if (!reauthorized) return result;
           }
         }
+        if (active.record.lifecycle === 'safe-halt') {
+          if (!active.record.terminalNotifications) active = await this.prepareSafeHaltNotice(active,
+            'The prior process stop could not be confirmed; the original detailed reason was not retained.');
+          active = await this.settleTerminalNotificationsBestEffort(active);
+          if (active.record.pendingEffect) return this.invokedFailure(active, 'safe-halt-notification-pending');
+        }
         if (!reauthorized && active.record.terminalOutcome && (active.record.terminalNotifications
           || active.record.pendingEffect?.kind === 'terminal-comment'
           || active.record.pendingEffect?.kind === 'terminal-labels')) {
@@ -1401,7 +1409,9 @@ export class RunIssue {
             const reconciled = await this.reconcilePersistedAttempt(active);
             if ('status' in reconciled) return reconciled;
             active = reconciled.active;
-            active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+            const resumed = await this.activateSafeHalt(active, attempt.operationId);
+            if ('result' in resumed) return resumed.result;
+            active = resumed.active;
             resumedSafeHalt = true;
           }
           if (active.record.lifecycle === 'publishing') {
@@ -1540,9 +1550,11 @@ export class RunIssue {
             return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true },
               'implementation-launch-ownership-unconfirmed');
           }
-          active = await this.persist(active, { lifecycle: 'safe-halt' });
+          const reason = implementation.reason ?? 'The Codex session process or its output streams could not be confirmed stopped.';
+          active = await this.prepareSafeHaltNotice(active, reason);
+          active = await this.settleTerminalNotificationsBestEffort(active);
           return await this.invokedFailure(active, 'active-attempt-observation-deferred',
-            'The Codex session process remains unresolved; the next tick observes its result and cleanup before continuing.');
+            `${reason} The run is resumable; the next tick observes the same process, result and cleanup before continuing.`);
         }
         if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline)
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
@@ -2201,6 +2213,24 @@ export class RunIssue {
     });
   }
 
+  private async prepareSafeHaltNotice(active: ActiveRun, reason: string): Promise<ActiveRun> {
+    const outcome = { status: 'blocked' as const, kind: 'safety' as const, resumable: true,
+      blocker: { kind: 'service', summary: reason, attempted: ['Bounded process exit, group absence and stream closure checks.'], resumable: true } };
+    return this.persist(active, { lifecycle: 'safe-halt',
+      terminalNotifications: terminalNotificationState(active.record, outcome, this.timestamp(), [], 'active-attempt-observation-deferred') });
+  }
+
+  private async activateSafeHalt(active: ActiveRun, operationId: string): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    if (active.record.terminalNotifications && !active.record.terminalOutcome) {
+      active = await this.persist(active, { pendingEffect: { kind: 'claim-labels', issueNumber: active.record.issueNumber,
+        expected: sortedUnique([active.config.github.labels.auto.name, active.config.github.labels.running.name]) } });
+      const claimed = await this.reconcileClaim(active, active.config);
+      if ('result' in claimed) return claimed;
+      active = claimed.active;
+    }
+    return { active: await this.persist(active, { lifecycle: lifecycleForAttempt(operationId), terminalNotifications: undefined }) };
+  }
+
   private async reconcilePersistedAttempt(
     active: ActiveRun,
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
@@ -2216,7 +2246,9 @@ export class RunIssue {
       active = cleanup.active;
       if (attempt.result) return { active };
       if (active.record.lifecycle === 'safe-halt') {
-        active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+        const resumed = await this.activateSafeHalt(active, attempt.operationId);
+        if ('result' in resumed) return resumed.result;
+        active = resumed.active;
       }
       return { active: await this.clearAttempt(active) };
     }
@@ -2250,7 +2282,9 @@ export class RunIssue {
     active = cleanup.active;
     if (observed.result) return { active };
     if (active.record.lifecycle === 'safe-halt') {
-      active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+      const resumed = await this.activateSafeHalt(active, attempt.operationId);
+      if ('result' in resumed) return resumed.result;
+      active = resumed.active;
     }
     return { active: await this.clearAttempt(active) };
   }
@@ -2959,7 +2993,7 @@ export class RunIssue {
 
   private async settleTerminalNotificationsBestEffort(starting: ActiveRun): Promise<ActiveRun> {
     let active = starting;
-    if (!active.record.terminalOutcome || !active.record.terminalNotifications) return active;
+    if (!active.record.terminalNotifications) return active;
     if (active.record.pendingEffect && active.record.pendingEffect.kind !== 'terminal-comment'
       && active.record.pendingEffect.kind !== 'terminal-labels') return active;
     try { active = await this.settleTerminalComment(active); } catch { return active; }
@@ -2975,7 +3009,8 @@ export class RunIssue {
       notifications = { ...notifications, comment: { ...notifications.comment, status: 'pending' } };
       active = await this.persist(active, { terminalNotifications: notifications });
     }
-    const body = terminalComment(active.record.runId, active.record.cycle, notifications.report);
+    const body = terminalComment(active.record.runId, active.record.cycle, notifications.report,
+      active.record.lifecycle === 'safe-halt' ? active.record.activeAttempt?.attemptId : undefined);
     const marker = body.split('\n')[0]!;
     const attempt = notifications.comment.attempts + 1;
     if (!active.record.pendingEffect) {
@@ -3268,6 +3303,10 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
 }
 
 function blockedDiagnostic(code: string, record: RunRecord): { summary: string; nextAction?: string } {
+  if (code === 'active-attempt-observation-deferred') return {
+    summary: 'The owned Codex process or its resources could not be confirmed stopped.',
+    nextAction: 'Rerun the same issue or let the next daemon tick observe the retained attempt. The run is resumable; continuation waits for confirmed process absence and cleanup. No new authorization is required.',
+  };
   if (code === 'candidate-git-v2-required') return {
     summary: record.candidateBinding
       ? 'The Runner cannot freeze and verify the exact Git candidate because its candidate Git adapter is unavailable.'
@@ -3302,9 +3341,9 @@ function internalErrorSummary(code: string): string {
     : `The runner encountered an internal failure (${code}) and could not complete this run.`;
 }
 
-function terminalComment(runId: string, cycle: number, report: TerminalReportSnapshotV1): string {
+function terminalComment(runId: string, cycle: number, report: TerminalReportSnapshotV1, haltAttemptId?: string): string {
   const markerKind = report.outcome === 'review-ready' ? 'handoff' : report.outcome;
-  const marker = `<!-- codex-orchestrator:run:${runId}:cycle:${cycle}:${markerKind} -->`;
+  const marker = `<!-- codex-orchestrator:run:${runId}:cycle:${cycle}:${haltAttemptId ? `safe-halt:${haltAttemptId}:` : ''}${markerKind} -->`;
   if (report.outcome === 'review-ready') {
     return [
       marker,
