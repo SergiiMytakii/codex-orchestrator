@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.42] - 2026-11-07
+
 ### Fixed
 
 - Admit confirmed unrelated Jest baseline failures without hiding new or affected failures.
