@@ -77,6 +77,9 @@ changed, or needed to resolve uncertainty. Do not create a separate tracking fil
    superseded paths in scope; do not add aliases, wrappers, adapters, fallback
    routes, or speculative layers.
 4. Verify the final change:
+   - **Cost:** under the [Cost rule](../../docs/agents/coding-skill-routing.md#shared-kernel),
+     substantiate the cost of the complete execution path with appropriate
+     evidence; revisit the approach if it contradicts material assumptions.
    - **Coverage:** run the smallest checks covering changed behavior and known
      failure conditions. A narrower check replaces a broader run only when it
      preserves the relevant trigger, state, and assertions; isolated CI groups

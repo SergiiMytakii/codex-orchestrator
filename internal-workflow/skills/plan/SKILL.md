@@ -38,6 +38,9 @@ source evidence already available rather than restarting discovery.
 Before settling the technical approach, apply the [Design Decisions rule](../../docs/agents/coding-skill-routing.md#design-decisions)
 in the normative coding route.
 
+Before choosing an approach, apply the [Cost rule](../../docs/agents/coding-skill-routing.md#shared-kernel);
+retain its evidence and material assumptions in the existing plan.
+
 Ground technical claims in concrete source references, recorded once in the
 plan or review inputs as appropriate to the artifact format. Distinguish
 observed behavior, proposed changes, and unresolved assumptions. Do not present

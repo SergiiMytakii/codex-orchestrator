@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Admit confirmed unrelated Jest baseline failures without hiding new or affected failures.
+- Keep temporary proof I/O, recognized Codex network errors and safely interrupted host checks resumable in the same run; remove only the running label and publish the concrete reason.
+- Preserve mobile proof leases, candidate integrity and protected-path evidence during recovery; keep retry notifications idempotent across repeated stops and GitHub delivery failures.
+- Synchronize packaged workflow instructions with current local sources, including execution-cost checks.
+
 ## [2.0.41] - 2026-11-04
 
 ### Fixed

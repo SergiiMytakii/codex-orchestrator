@@ -13,6 +13,8 @@ Review a settled change through two independent lenses:
   Read [standards-smells.md](references/standards-smells.md); report smells as
   observations unless evidence meets the blocker threshold. Repository policy
   takes precedence; do not duplicate tooling-enforced findings.
+  Under the [Cost rule](../../docs/agents/coding-skill-routing.md#shared-kernel),
+  verify that cost evidence matches the actual implementation and expected scale.
 
 Review is inspection-only. Never edit, repair, stage, commit, push, or open a PR.
 Use Implement's change classification to determine whether independent Review

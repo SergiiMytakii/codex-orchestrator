@@ -51,6 +51,8 @@ Inspect every applicable lens:
 - requirements and product behavior, including missing and extra outcomes;
 - existing callers and neighboring flows, ownership, and public contracts;
 - persistence and existing data, including in-flight or historical state;
+- independently verify the cost assessment and assumptions that could change
+  the solution choice under the [Cost rule](../../docs/agents/coding-skill-routing.md#shared-kernel);
 - concurrency and asynchronous boundaries around shared state;
 - failure, retry, cancellation, idempotency, and recovery behavior;
 - security and privacy for identities, permissions, secrets, or personal data;
