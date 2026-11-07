@@ -1,3 +1,4 @@
+import { isRetryableInfrastructureError } from './runtime-errors.js';
 import { runConfiguredChecks, buildHostCheckEnvironment } from './runner-checks.js';
 import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
@@ -876,7 +877,7 @@ export class ContainedImplementationAgent {
         return { kind: 'completed', attemptId, report: decodeAgentReportForValidation(recovered), reportBytes: recovered };
       } catch (error) {
         if (!isErrorCode(error, 'ENOENT')) {
-          if (isTechnicalRuntimeError(error)) throw error;
+          if (isRetryableInfrastructureError(error)) throw error;
           return { kind: 'internal-error' };
         }
       }
@@ -957,9 +958,9 @@ export class ContainedImplementationAgent {
       }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
         return { kind: 'transport-failed', resumable: true,
-          ...(result.error === 'codex-model-capacity' ? { failure: {
+          ...(['codex-model-capacity', 'codex-network-failure'].includes(result.error ?? '') ? { failure: {
             kind: 'transport-failed' as const, exitCode: result.exitCode, signal: result.signal,
-            reportStatus: result.report.kind, detail: 'codex-model-capacity',
+            reportStatus: result.report.kind, detail: result.error!,
           } } : {}) };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
@@ -970,7 +971,7 @@ export class ContainedImplementationAgent {
       };
     } catch (error) {
       if (!(error instanceof ProcessQuiescenceError)) {
-        if (isTechnicalRuntimeError(error)) throw error;
+        if (isRetryableInfrastructureError(error)) throw error;
         return { kind: 'internal-error' };
       }
       unresolvedProcess = true;
@@ -1226,6 +1227,10 @@ export function createV2Runtime(input: {
     const source = await git.candidateV2.inspectSource({ binding: payload.binding, worktreePath,
       runId: payload.runId, boundary, artifactDir: config.proof.artifactDir });
     const pin = await git.candidateV2.inspectPin(payload.binding);
+    for (const observation of [source, pin]) {
+      if (observation.kind === 'failed') throw new CandidateProofInspectionError(observation.code,
+        ['candidate-io-failed', 'candidate-unstable', 'candidate-materialization-io-failed'].includes(observation.code));
+    }
     if (source.kind !== 'ok' || source.value !== 'matching' || pin.kind !== 'ok' || pin.value !== 'matching')
       throw new CandidateProofInspectionError('candidate-source-or-pin-drift');
     return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha, checkPolicySha256 };
@@ -1816,11 +1821,6 @@ export async function materializeReportReadView(input: {
 }
 
 
-function isTechnicalRuntimeError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (typeof code === 'string' && ['EIO', 'ENOENT', 'EAGAIN', 'EINTR', 'ENOSPC', 'EMFILE', 'ENFILE', 'EBUSY', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
-  return error instanceof Error && /^(?:git failed:|report read-view inventory failed:)/u.test(error.message);
-}
 
 function reportOnlyPolicy(policy: WorkflowOperationPolicy): WorkflowOperationPolicy {
   return { ...policy, sandboxMode: 'read-only', worktreeAccess: 'read-only', writableRootClasses: [], runnerPostcondition: 'report-only', network: 'deny', networkHosts: [] };

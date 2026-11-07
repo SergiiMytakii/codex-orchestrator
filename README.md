@@ -250,6 +250,15 @@ process's stderr return resumable `transport-failed` with local evidence code
 `codex-model-capacity`. A leftover output report cannot turn that refusal into
 success. The Runner retains the same session and worktree without switching models.
 
+Temporary filesystem/network errors during proof admission and recognized Codex
+network failures remain resumable. The Runner removes only `agent:running` and
+posts the reason; it does not add a blocking label. Proof integrity failures
+still stop publication. Interrupted host checks are retried only after the
+repository owner lock can be acquired, with unchanged source/policy bindings
+and protected-path fingerprints; partial results are never accepted as passing.
+Older interrupted checks protecting files but lacking their original fingerprint retain
+a resumable diagnostic without replay; the Runner does not invent a baseline.
+
 Owner-reported tool or service blockers stop with `agent:blocked` and publish
 bounded diagnostics, even when `resumable: true`. Resumable means the same Run,
 session and worktree can continue after the prerequisite is resolved; it does not

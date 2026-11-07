@@ -131,7 +131,7 @@ test('host mode rejects worker-only receipts without trusted command execution',
   assert.equal(fixture.events.includes('git:push'), false);
 });
 
-for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged-output', 'interrupted'] as const) {
+for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged-output'] as const) {
   test(`host evidence rejects ${failure} before publication`, async () => {
     const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: failure === 'failed-command' ? 'exit 9' : 'printf host-passed' },
       implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } }] });
@@ -150,17 +150,92 @@ for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged
         return r;
       };
     }
-    if (failure === 'interrupted') {
-      const state = await fixture.store.read();
-      state.runs[0]!.runnerChecks = { ...state.runs[0]!.runnerChecks!, status: 'pending', results: [] };
-      await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
-      fixture.dependencies.configuredChecks!.run = async () => { throw new Error('must never replay interrupted host action'); };
-    }
+
     assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
     assert.equal(fixture.events.includes('proof:admission'), false);
     assert.equal(fixture.events.includes('git:push'), false);
   });
 }
+
+test('interrupted settled host checks retry in the same run without blocking', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+    implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+  const runChecks = fixture.dependencies.configuredChecks!.run;
+  fixture.dependencies.configuredChecks!.run = async () => { throw Object.assign(new Error('temporary log access'), { code: 'EIO' }); };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const first = await fixture.runner.runIssue(input);
+  assert.equal(first.status, 'transport-failed');
+  const before = (await fixture.store.read()).runs[0]!;
+  assert.equal(before.runnerChecks?.status, 'pending');
+  fixture.dependencies.configuredChecks!.run = runChecks;
+  const resumed = await fixture.newRunner().runIssue(input);
+  assert.equal(resumed.status, 'transport-failed');
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runnerChecks?.status, 'complete');
+  assert.equal(after.terminalOutcome, undefined);
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.cycle, before.cycle);
+  assert.deepEqual(after.codexSession, before.codexSession);
+  assert.equal((await fixture.dependencies.issues.read(42))!.labels.includes('agent:blocked'), false);
+});
+
+test('pending host checks wait for ownership and reject protected-path drift across restart', async () => {
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf passed' },
+    implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+  let calls = 0;
+  fixture.dependencies.configuredChecks!.run = async () => { calls++; throw Object.assign(new Error('temporary execution failure'), { code: 'EIO' }); };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  fixture.options.ownerContention = true;
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'requeued');
+  assert.equal(calls, 1);
+  fixture.options.ownerContention = false;
+  fixture.dependencies.git.fingerprintDeniedPaths = async () => 'f'.repeat(64);
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'blocked');
+  assert.equal(calls, 1);
+});
+
+test('legacy interrupted checks without protected-path evidence never adopt current bytes or duplicate notices', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+    implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+  (await fixture.dependencies.readConfig(fixture.targetRoot)).config.deny.readPaths = ['private-state.json'];
+  let calls = 0;
+  fixture.dependencies.configuredChecks!.run = async () => { calls++; throw new Error('interrupted'); };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  const state = await fixture.store.read();
+  delete state.runs[0]!.runnerChecks!.protectedPathsSha256;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+  for (let i = 0; i < 2; i++) {
+    const result = await fixture.newRunner().runIssue(input);
+    assert.equal(result.status, 'transport-failed');
+    assert.equal('resumable' in result && result.resumable, true);
+  }
+  assert.equal(calls, 1);
+  const issue = (await fixture.dependencies.issues.read(42))!;
+  assert.deepEqual(issue.labels, ['agent:auto']);
+  assert.equal(issue.comments.filter(comment => comment.body.includes('original protected-path fingerprint')).length, 1);
+  assert.equal((await fixture.store.read()).runs[0]!.terminalOutcome, undefined);
+});
+
+test('legacy interrupted checks with no protected paths resume without an unnecessary evidence gate', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+    implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+  const runChecks = fixture.dependencies.configuredChecks!.run;
+  fixture.dependencies.configuredChecks!.run = async () => { throw new Error('interrupted'); };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  const state = await fixture.store.read();
+  delete state.runs[0]!.runnerChecks!.protectedPathsSha256;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+  fixture.dependencies.configuredChecks!.run = runChecks;
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'transport-failed');
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runnerChecks?.status, 'complete');
+  assert.equal(after.terminalOutcome, undefined);
+  assert.equal(after.runId, state.runs[0]!.runId);
+  assert.equal((await fixture.dependencies.issues.read(42))!.labels.includes('agent:blocked'), false);
+});
 
 test('explicit host check request can retry unchanged source after environment repair', async () => {
   const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } };
@@ -587,6 +662,44 @@ test('terminal cancellation labels do not revoke a fresh grant arriving during c
   assert.equal(authorizationChecks, 1);
   assert.equal((await fixture.dependencies.issues.read(42))?.labels.includes('agent:auto'), true);
   assert.equal(fixture.events.filter(event => event === 'effect:terminal-labels').length, 1);
+});
+
+test('temporary proof admission failure removes only running and retries the same candidate', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, initialLabels: ['agent:auto', 'manual:keep'], proof: async () => ({
+    status: 'transport-failed', resumable: true, receipt: { ...receipt(), summary: 'Proof artifact read temporarily unavailable: EIO' },
+  }) });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const first = await fixture.runner.runIssue(input);
+  assert.equal(first.status, 'transport-failed');
+  const before = (await fixture.store.read()).runs[0]!;
+  assert.equal(before.terminalOutcome, undefined);
+  assert.deepEqual((await fixture.dependencies.issues.read(42))!.labels, ['agent:auto', 'manual:keep']);
+  assert.ok((await fixture.dependencies.issues.read(42))!.comments.some(comment => comment.body.includes('EIO')));
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  fixture.options.proof = undefined;
+  const resumed = await fixture.newRunner().runIssue(input);
+  assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, evidence: fixture.evidence }));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.cycle, before.cycle);
+  assert.deepEqual(after.codexSession, before.codexSession);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+});
+
+test('proof retry notices survive GitHub delivery failure without reimplementing the candidate', async () => {
+  for (const failedEffect of ['comment', 'labels'] as const) {
+    const fixture = await runFixture({ fileBackedStore: true, rejectEffect: failedEffect, proof: async () => ({
+      status: 'transport-failed', resumable: true, receipt: { ...receipt(), summary: 'Temporary proof EIO' },
+    }) });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    await fixture.runner.runIssue(input);
+    const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+    fixture.options.proof = undefined;
+    assert.equal((await fixture.newRunner().runIssue(input)).status, 'review-ready');
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+    const comments = (await fixture.dependencies.issues.read(42))!.comments;
+    assert.equal(comments.filter(comment => comment.body.includes('Temporary proof EIO')).length, 1);
+  }
 });
 
 test('a fresh GitHub grant retains the Run and owner while refreshing candidate evidence', async () => {

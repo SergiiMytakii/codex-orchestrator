@@ -37,6 +37,44 @@ test('input, inspection, report and artifact failures retain a bounded diagnosti
   }
 });
 
+test('temporary proof inspection failures remain retryable without admitting evidence', async () => {
+  const fixture = proofFixture({ inspectFreshness: async () => { throw Object.assign(new Error('temporarily unavailable'), { code: 'EIO' }); } });
+  const result = await fixture.proof.admitReport(fixture.input());
+  assert.equal(result.status, 'transport-failed');
+  assert.equal('resumable' in result && result.resumable, true);
+  assert.deepEqual(fixture.artifactReads, []);
+});
+
+test('temporary artifact reads retry but hash mismatches remain rejected', async () => {
+  for (const code of ['EIO', 'EAGAIN', 'ETIMEDOUT']) {
+    const fixture = proofFixture({ artifactReadError: Object.assign(new Error('temporary read error'), { code }) });
+    const result = await fixture.proof.admitReport(fixture.input());
+    assert.equal(result.status, 'transport-failed');
+    assert.equal('resumable' in result && result.resumable, true);
+  }
+  const invalid = proofFixture({ artifactContent: Buffer.from('tampered') });
+  assert.equal((await invalid.proof.admitReport(invalid.input())).status, 'internal-error');
+});
+
+test('transient mobile admission failure retains lease custody for the same proof', async () => {
+  let releases = 0;
+  let available = false;
+  const fixture = proofFixture({ androidLease: { verify: async () => {}, release: async () => { releases++; } },
+    inspectFreshness: async payload => {
+      if (!available) throw new CandidateProofInspectionError('candidate-io-failed', true);
+      return freshness(payload);
+    } });
+  const first = await fixture.proof.admitReport(fixture.input());
+  assert.equal(first.status, 'transport-failed');
+  assert.equal('resumable' in first && first.resumable, true);
+  assert.equal(releases, 0);
+  available = true;
+  assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'passed');
+  assert.equal(releases, 1);
+  const drift = proofFixture({ inspectFreshness: async () => { throw new CandidateProofInspectionError('candidate-source-or-pin-drift'); } });
+  await assert.rejects(drift.proof.admitReport(drift.input()), /candidate-source-or-pin-drift/u);
+});
+
 test('failure detail redacts sensitive text before truncation', async () => {
   for (const message of ['access_token=credential-material-12345', 'token=credential-material-12345',
     'ENOENT /Users/example/private/evidence.json', 'x'.repeat(2000) + ' password=credential-material-12345']) {
@@ -206,7 +244,7 @@ test('mandatory Android live proof cannot pass through nonvisual evidence', asyn
 });
 
 function proofFixture(options: {
-  report?: ProofReportV1; artifactContent?: Buffer; modifiedAt?: string; metadataUnavailable?: boolean;
+  report?: ProofReportV1; artifactContent?: Buffer; modifiedAt?: string; metadataUnavailable?: boolean; artifactReadError?: Error;
   inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
   androidLease?: AndroidLeaseVerifier; signal?: AbortSignal;
 } = {}) {
@@ -219,7 +257,7 @@ function proofFixture(options: {
   const issue: IssueSnapshot = { number: 42, title: 'Implement behavior', body: '## Acceptance Criteria\n- The behavior works.', url: 'https://example.invalid/issues/42', state: 'OPEN', labels: ['agent:auto'] };
   const proof = new AcceptanceProof({ checkedChangeReader: capabilities,
     inspectFreshness: async (value) => { if (value.version !== 1) throw new Error('legacy fixture received V2 payload'); freshnessCalls.push(value); return options.inspectFreshness?.(value) ?? freshness(value); },
-    readArtifact: async (path) => { artifactReads.push(path); if (path !== artifactPath()) throw new Error('artifact missing'); return options.artifactContent ?? artifactBytes; },
+    readArtifact: async (path) => { artifactReads.push(path); if (options.artifactReadError) throw options.artifactReadError; if (path !== artifactPath()) throw new Error('artifact missing'); return options.artifactContent ?? artifactBytes; },
     inspectArtifact: options.metadataUnavailable ? undefined : async () => ({ modifiedAt: options.modifiedAt ?? '2026-07-16T12:00:01.000Z' }),
     proofArtifactDir: 'proofs', androidLease: options.androidLease, signal: options.signal,
   });

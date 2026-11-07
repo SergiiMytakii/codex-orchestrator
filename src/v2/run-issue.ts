@@ -1304,6 +1304,15 @@ export class RunIssue {
             if (!reauthorized) return result;
           }
         }
+        if (!active.record.terminalOutcome && active.record.lifecycle !== 'safe-halt' && active.record.terminalNotifications) {
+          active = await this.settleTerminalNotificationsBestEffort(active);
+          if (active.record.pendingEffect) return this.invokedFailure(active, 'retry-notification-pending');
+          active = await this.persist(active, { pendingEffect: { kind: 'claim-labels', issueNumber: active.record.issueNumber,
+            expected: sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]) } });
+          const claimed = await this.reconcileClaim(active, config);
+          if ('result' in claimed) return claimed.result;
+          active = await this.persist(claimed.active, { terminalNotifications: undefined });
+        }
         if (active.record.lifecycle === 'safe-halt') {
           if (!active.record.terminalNotifications) active = await this.prepareSafeHaltNotice(active,
             'The prior process stop could not be confirmed; the original detailed reason was not retained.');
@@ -1482,7 +1491,7 @@ export class RunIssue {
       if (!active.record.proofId) active = await this.persist(active, { proofId: this.dependencies.createProofId() });
 
       if (config.runner.checkExecution === 'host' && active.record.runnerChecks?.status === 'pending')
-        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'runner-checks-interrupted');
+        return await this.runHostChecks(active, config);
 
       const recoveringAndroidPreparation = active.record.androidProofPreparation?.status === 'pending';
       let androidProofRequested = recoveringAndroidPreparation;
@@ -1560,8 +1569,8 @@ export class RunIssue {
           active = await this.clearAttempt(active);
           active = await this.persist(active, { transportRetries: active.record.transportRetries + 1 });
           const modelCapacity = implementation.failure?.detail === 'codex-model-capacity';
-          return await this.invokedFailure(active, modelCapacity ? 'codex-model-capacity' : 'implementation-transport-retryable',
-            `${modelCapacity ? 'The selected model is at capacity. ' : ''}The next invocation resumes the same Codex session after confirmed cleanup.`, implementation.failure);
+          return await this.retryableFailure(active, modelCapacity ? 'codex-model-capacity' : 'implementation-transport-retryable',
+            `${modelCapacity ? 'The selected model is at capacity. ' : `Codex session failed: ${implementation.failure?.detail ?? 'transport-failed'}. `}The next invocation resumes the same Codex session after confirmed cleanup.`, implementation.failure);
         }
         if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
         let report: ImplementationReportV1;
@@ -1590,16 +1599,9 @@ export class RunIssue {
           const policySha256 = runnerCheckPolicySha256(config.checks);
           active = await this.persist(active, { lifecycle: 'checking', implementationResult: undefined,
             implementationReportCorrection: undefined, reportRepairs: 0,
-            runnerChecks: { status: 'pending', sourceSha256, policySha256, results: [] } });
-          if (!await this.authorized(active, config)) return await this.revoked(active);
-          const protectedBefore = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
-          const results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath, baseSha: active.record.baseSha,
-            proofId: active.record.proofId!, signal: this.signal });
-          if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== protectedBefore)
-            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
-          active = await this.persist(active, { lifecycle: 'implementing',
-            runnerChecks: { status: 'complete', sourceSha256, policySha256, results } });
-          return await this.invokedFailure(active, 'runner-checks-ready', 'The next invocation resumes the same Codex session with complete host-check logs and results before proof and independent Review.');
+            runnerChecks: { status: 'pending', sourceSha256, policySha256, results: [],
+              protectedPathsSha256: await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) } });
+          return await this.runHostChecks(active, config);
         }
         const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
         if (changedFiles.length === 0) return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
@@ -2211,6 +2213,52 @@ export class RunIssue {
     });
   }
 
+  private async runHostChecks(active: ActiveRun, config: AgentAutoConfig): Promise<RunIssueResult> {
+    // runIssue has acquired the repository owner lock. That lock refuses reclaim while
+    // any prior owned command may still be live; pending results are never admitted.
+    const pending = active.record.runnerChecks!;
+    if (!pending.protectedPathsSha256 && config.deny.readPaths.length > 0) return this.retryableFailure(active, 'runner-checks-baseline-unavailable',
+      'The interrupted check did not retain its original protected-path fingerprint. Its results cannot be trusted or replayed without that evidence.');
+    const observedProtected = await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths);
+    // With no protected paths, the historical fingerprint is the known empty set.
+    const protectedBefore = pending.protectedPathsSha256 ?? sha256(canonicalJson([]));
+    if (observedProtected !== protectedBefore)
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
+    const sourceSha256 = sha256(canonicalJson(await this.dependencies.git.snapshot(active.record.worktreePath)));
+    const policySha256 = runnerCheckPolicySha256(config.checks);
+    if (sourceSha256 !== pending.sourceSha256 || policySha256 !== pending.policySha256) {
+      active = await this.persist(active, { lifecycle: 'implementing', runnerChecks: undefined });
+      return this.retryableFailure(active, 'runner-checks-binding-changed', 'The source or check policy changed while checks were interrupted. The same owner must request fresh checks.');
+    }
+    if (!this.dependencies.configuredChecks) return this.retryableFailure(active, 'runner-checks-unavailable', 'The host-check executor is unavailable.');
+    if (!await this.authorized(active, config)) return this.revoked(active);
+    let results: RunnerCheckResult[];
+    try {
+      results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath: active.record.worktreePath,
+        baseSha: active.record.baseSha, proofId: active.record.proofId!, signal: this.signal });
+    } catch (error) {
+      if (await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== protectedBefore)
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
+      if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
+      return this.retryableFailure(active, 'runner-checks-retryable', publicBlockedText(error instanceof Error ? error.message : 'Host checks did not complete.', 'Host checks did not complete.', 1024));
+    }
+    if (await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== protectedBefore)
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
+    active = await this.persist(active, { lifecycle: 'implementing',
+      runnerChecks: { status: 'complete', sourceSha256, policySha256, results, protectedPathsSha256: protectedBefore } });
+    return this.invokedFailure(active, 'runner-checks-ready', 'The next invocation resumes the same Codex session with complete host-check logs and results before proof and independent Review.');
+  }
+
+  private async retryableFailure(active: ActiveRun, code: string, summary: string, failure?: ProofProcessFailure): Promise<RunIssueResult> {
+    if (!active.record.pendingEffect) {
+      const outcome = { status: 'blocked' as const, kind: 'safety' as const, resumable: true,
+        blocker: { kind: 'service', summary, attempted: ['The current bounded Runner operation did not complete.'], resumable: true } };
+      active = await this.persist(active, { terminalNotifications: terminalNotificationState(active.record, outcome, this.timestamp(), [], code) });
+      active = await this.settleTerminalNotificationsBestEffort(active);
+    }
+    return this.invokedFailure(active, code, summary, failure);
+  }
+
   private async prepareSafeHaltNotice(active: ActiveRun, reason: string): Promise<ActiveRun> {
     const outcome = { status: 'blocked' as const, kind: 'safety' as const, resumable: true,
       blocker: { kind: 'service', summary: reason, attempted: ['Bounded process exit, group absence and stream closure checks.'], resumable: true } };
@@ -2703,7 +2751,9 @@ export class RunIssue {
     if (proof.status === 'external-block') {
       return await this.handleExternalBlock(active, proof.blocker);
     }
-    if (proof.status === 'transport-failed') return await this.terminal(active, { status: 'transport-failed', resumable: proof.resumable });
+    if (proof.status === 'transport-failed') return proof.resumable
+      ? this.retryableFailure(active, 'acceptance-proof-retryable', proof.receipt?.summary ?? 'Acceptance proof infrastructure is temporarily unavailable.')
+      : this.terminal(active, { status: 'transport-failed', resumable: false });
     if (proof.status === 'cancelled') return await this.terminal(active, { status: 'cancelled' });
     if (proof.status === 'internal-error') {
       try {
@@ -3008,7 +3058,8 @@ export class RunIssue {
       active = await this.persist(active, { terminalNotifications: notifications });
     }
     const body = terminalComment(active.record.runId, active.record.cycle, notifications.report,
-      active.record.lifecycle === 'safe-halt' ? active.record.activeAttempt?.attemptId : undefined);
+      !active.record.terminalOutcome ? active.record.lifecycle === 'safe-halt' ? active.record.activeAttempt?.attemptId
+        : `retry:${sha256(canonicalJson(notifications.report))}` : undefined);
     const marker = body.split('\n')[0]!;
     const attempt = notifications.comment.attempts + 1;
     if (!active.record.pendingEffect) {
@@ -3051,7 +3102,7 @@ export class RunIssue {
   private async settleTerminalLabels(starting: ActiveRun): Promise<ActiveRun> {
     let active = starting;
     let notifications = active.record.terminalNotifications!;
-    const policy = active.record.lifecycle === 'safe-halt'
+    const policy = !active.record.terminalOutcome
       ? { add: [], remove: [active.config.github.labels.running.name] }
       : terminalLabelChanges(active.config, notifications.report.outcome);
     if (notifications.labels.status === 'delivered') {
@@ -3303,6 +3354,10 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
 }
 
 function blockedDiagnostic(code: string, record: RunRecord): { summary: string; nextAction?: string } {
+  if (['acceptance-proof-retryable', 'runner-checks-retryable', 'runner-checks-unavailable', 'runner-checks-binding-changed', 'implementation-transport-retryable', 'codex-model-capacity'].includes(code)) return {
+    summary: 'A technical Runner operation did not complete; the run remains resumable.',
+    nextAction: 'Rerun the same issue or let the next daemon tick continue the retained run. No new authorization is required; prior process ownership and evidence are checked before continuing.',
+  };
   if (code === 'active-attempt-observation-deferred') return {
     summary: 'The owned Codex process or its resources could not be confirmed stopped.',
     nextAction: 'Rerun the same issue or let the next daemon tick observe the retained attempt. The run is resumable; continuation waits for confirmed process absence and cleanup. No new authorization is required.',

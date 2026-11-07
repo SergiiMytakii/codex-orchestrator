@@ -611,9 +611,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (terminal && (value.terminalOutcome as RunTerminalOutcome).status !== value.lifecycle) throw new Error(`${field} terminalOutcome does not match lifecycle`);
   if (hasOwn(value, 'terminalNotifications')) {
     const report = (value.terminalNotifications as TerminalNotificationStateV1).report;
-    const safeHaltNotice = value.lifecycle === 'safe-halt' && report.outcome === 'blocked'
+    const resumableNotice = ['safe-halt', 'implementing', 'checking', 'proving', 'reviewing'].includes(value.lifecycle as string) && report.outcome === 'blocked'
       && report.blocker?.kind === 'safety' && report.blocker.resumable === true;
-    if (!safeHaltNotice && (!terminal || value.lifecycle === 'transport-failed'
+    if (!resumableNotice && (!terminal || value.lifecycle === 'transport-failed'
       || report.outcome !== value.lifecycle)) {
       throw new Error(`${field} terminal notification outcome does not match lifecycle`);
     }

@@ -86,8 +86,13 @@ SDKs. The Agent requests this finite action with `checks-request`; Runner retain
 complete local output, exit codes and source/policy-bound receipts, then resumes
 the same Codex session before Acceptance Proof and independent Review. It uses
 existing owned-command fencing, cancellation, timeouts and process cleanup.
-An interrupted host action is never automatically replayed. Failures remain
-with the same implementation owner for scoped repair or a concrete blocker.
+An interrupted host check may be retried after the repository owner lock can
+be acquired and its original source/policy bindings and protected-path fingerprint
+still match. Incomplete output is never accepted as passing evidence. A missing
+original fingerprint for a nonempty protected-path set retains a resumable diagnostic without replay or a blocking
+label; current bytes must not be substituted as the historical baseline. Transient
+proof I/O and recognized Codex network failures likewise retain the same run,
+remove only the running label, and do not consume a new implementation cycle.
 Existing configurations retain worker-side verification. Setup opts into host
 checks only with `--flutter-sdk`; it records executable paths in existing check
 commands without adding SDK discovery, installation, cloning or cache ownership.

@@ -1,3 +1,4 @@
+import { isRetryableInfrastructureError } from './runtime-errors.js';
 import { readIssueProofRequirements, type IssueProofRequirements } from './issue-proof-policy.js';
 import { posix } from 'node:path';
 
@@ -52,7 +53,7 @@ export interface ProofProcessFailure {
 }
 
 export class CandidateProofInspectionError extends Error {
-  constructor(readonly code: string) { super(code); }
+  constructor(readonly code: string, readonly retryable = false) { super(code); }
 }
 
 export type SettledProveChangeResult =
@@ -66,7 +67,7 @@ export type SettledProveChangeResult =
 export type ProveChangeResult =
   | SettledProveChangeResult
   | { status: 'safe-halt' }
-  | { status: 'transport-failed'; resumable: true; failure?: ProofProcessFailure }
+  | { status: 'transport-failed'; resumable: true; failure?: ProofProcessFailure; receipt?: ProofReceipt }
   | { status: 'report-repair'; reportRepairCount: number; findings: string[]; reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string } }
   | {
       status: 'cleanup-pending';
@@ -194,7 +195,12 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       }
       return this.settle(input.proofId, { status: 'external-block', blocker: structuredClone(report.blocker!), receipt });
     } catch (error) {
-      if (error instanceof CandidateProofInspectionError) throw error;
+      if (error instanceof CandidateProofInspectionError && !error.retryable) throw error;
+      // The same evidence and active mobile lease are required on the next attempt.
+      // Only a settled proof/cancellation/terminal outcome may release that custody.
+      if ((error instanceof CandidateProofInspectionError && error.retryable) || isRetryableInfrastructureError(error))
+        return { status: 'transport-failed', resumable: true,
+          receipt: emptyReceipt(input.proofId, bindingSha256, proofFailureSummary(`Acceptance proof ${stage} temporarily unavailable`, error)) };
       return this.settle(input.proofId, { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256,
         proofFailureSummary(`Acceptance proof ${stage} failed`, error)) });
     }

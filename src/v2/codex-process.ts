@@ -274,11 +274,10 @@ export class CodexProcess {
       return finalizeResult('transport-failed', child, settled, report, 'codex-model-capacity');
     }
     if (
-      report.kind !== 'available'
-      && settled.exit.exitCode !== 0
+      settled.exit.exitCode !== 0
       && isConfirmedTransportFailure(settled.streams.stderr)
     ) {
-      return finalizeResult('transport-failed', child, settled, report);
+      return finalizeResult('transport-failed', child, settled, report, 'codex-network-failure');
     }
     if (report.kind === 'missing' && settled.exit.exitCode === 0 && settled.exit.signal === null) {
       return finalizeResult('transport-failed', child, settled, report);
@@ -293,7 +292,7 @@ export class CodexProcess {
 
 function isConfirmedTransportFailure(stderr: Buffer): boolean {
   const diagnostic = stderr.toString('utf8');
-  return diagnostic.includes('stream disconnected before completion');
+  return /stream disconnected before completion|\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|EAI_AGAIN|EPIPE)\b|connection reset by peer|temporary failure in name resolution/iu.test(diagnostic);
 }
 
 type TerminalObservation =

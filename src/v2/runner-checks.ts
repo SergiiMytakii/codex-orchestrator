@@ -35,6 +35,7 @@ export interface RunnerChecks {
   sourceSha256: string;
   policySha256: string;
   results: RunnerCheckResult[];
+  protectedPathsSha256?: string;
 }
 
 /** Trusted local checks inherit the Runner environment without filtering keys. */
@@ -164,7 +165,8 @@ export async function runConfiguredChecks(input: {
 export function validateRunnerChecks(value: unknown): asserts value is RunnerChecks {
   if (!value || typeof value !== 'object') throw new Error('runnerChecks is invalid');
   const r = value as Record<string, unknown>;
-  if (Object.keys(r).sort().join(',') !== 'policySha256,results,sourceSha256,status'
+  if (Object.keys(r).filter(key => key !== 'protectedPathsSha256').sort().join(',') !== 'policySha256,results,sourceSha256,status'
+    || ('protectedPathsSha256' in r && (typeof r.protectedPathsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.protectedPathsSha256)))
     || !['pending', 'complete'].includes(r.status as string)
     || !/^[0-9a-f]{64}$/.test(r.sourceSha256 as string)
     || !/^[0-9a-f]{64}$/.test(r.policySha256 as string)

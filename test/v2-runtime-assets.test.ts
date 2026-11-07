@@ -406,6 +406,12 @@ test('contained owner maps settled infrastructure failures to resumable outcomes
     { kind: 'transport-failed', resumable: true, failure: {
       kind: 'transport-failed', exitCode: 1, signal: null, reportStatus: 'available', detail: 'codex-model-capacity',
     } });
+  processResult = Object.assign({ kind: 'transport-failed', exitCode: 1, signal: null, stderr: Buffer.alloc(0), report: { kind: 'available' } },
+    { error: 'codex-network-failure' });
+  assert.deepEqual(await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'owner-network-failure' }),
+    { kind: 'transport-failed', resumable: true, failure: {
+      kind: 'transport-failed', exitCode: 1, signal: null, reportStatus: 'available', detail: 'codex-network-failure',
+    } });
   processResult = Object.assign({ kind: 'transport-failed', exitCode: 0, signal: null, stderr: Buffer.alloc(0), report: { kind: 'missing' } }, { error: 'session CAS rejected' });
   assert.deepEqual(await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'owner-session-persistence-failure' }),
     { kind: 'transport-failed', resumable: true });

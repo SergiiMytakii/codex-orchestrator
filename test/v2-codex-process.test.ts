@@ -342,6 +342,18 @@ test('classifies successful Codex exit without its output report as resumable tr
   });
 });
 
+test('recognized network failures retry even with a retained report and varied diagnostics', async () => {
+  for (const diagnostic of ['read ECONNRESET', 'connect ETIMEDOUT', 'network: EAI_AGAIN', 'connection reset by peer', 'stream disconnected before completion']) {
+    for (const writeReport of [false, true]) {
+      await withRunFixture(async fixture => {
+        const result = await new CodexProcess(async () => new FakeChild({ reportPath: fixture.reportPath,
+          exit: { exitCode: 1, signal: null }, streams: { stdout: Buffer.alloc(0), stderr: Buffer.from(diagnostic), truncated: false }, writeReport })).run(fixture.input(), new AbortController().signal);
+        assert.equal(result.kind, 'transport-failed', diagnostic);
+      });
+    }
+  }
+});
+
 test('capacity diagnostics reject an available report without masking unrelated process failures', async () => {
   for (const entry of [
     { writeReport: true, diagnostic: 'Selected model is at capacity. Please try a different model.', expected: 'transport-failed' },
