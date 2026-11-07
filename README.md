@@ -11,8 +11,9 @@ Add the configured `agent:auto` label to an open executable issue, then run the 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
 If process exit, process-group absence or output-stream closure cannot be confirmed,
-the Runner retains a resumable safe halt. GitHub shows `agent:blocked` instead of
-`agent:running`, with the concrete failed check in a comment. The next invocation
+the Runner retains a resumable safe halt. The Runner removes only
+`agent:running`, with the concrete failed check in a comment. It does not add
+`agent:blocked` or any other status label. The next invocation
 observes the same attempt before continuing; it restores `agent:running` only
 after process absence and cleanup are confirmed. No new authorization or
 implementation cycle is required for this recovery.

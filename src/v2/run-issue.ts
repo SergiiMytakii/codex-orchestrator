@@ -350,9 +350,7 @@ export class RunIssue {
     if (claimLabelProjectionSettled(observation.labels, config) && !active.record.pendingEffect) return { active };
     const labels = new Set(observation.labels);
     if (!labels.has(config.github.labels.auto.name)
-      || (labels.has(config.github.labels.blocked.name) && !(active.record.lifecycle === 'safe-halt'
-        && active.record.terminalNotifications?.report.blocker?.resumable === true
-        && active.record.activeAttempt?.stage === 'observed' && active.record.activeAttempt.cleanup === 'confirmed'))
+      || labels.has(config.github.labels.blocked.name)
       || labels.has(config.github.labels.review.name)) {
       return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
     }
@@ -3053,7 +3051,9 @@ export class RunIssue {
   private async settleTerminalLabels(starting: ActiveRun): Promise<ActiveRun> {
     let active = starting;
     let notifications = active.record.terminalNotifications!;
-    const policy = terminalLabelChanges(active.config, notifications.report.outcome);
+    const policy = active.record.lifecycle === 'safe-halt'
+      ? { add: [], remove: [active.config.github.labels.running.name] }
+      : terminalLabelChanges(active.config, notifications.report.outcome);
     if (notifications.labels.status === 'delivered') {
       const issue = await this.readIssue(active.record.issueNumber);
       const settled = issue && policy.add.every((label) => issue.labels.includes(label))
