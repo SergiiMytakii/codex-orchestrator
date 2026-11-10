@@ -128,7 +128,7 @@ for (const checkpoint of ['host-checks', 'implementation', 'checks', 'proof', 'r
       const after = (await recoveryStore(root).read()).runs[0]!;
       assert.equal(after.runId, before.runId);
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'host-check:first', 'host-check:second', 'proof', 'review', 'claim-labels', 'claim-comment', 'commit', 'push', 'pr']) {
+      for (const event of ['implementation', 'host-check:check:first', 'host-check:check:second', 'proof', 'review', 'claim-labels', 'claim-comment', 'commit', 'push', 'pr']) {
         assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
       }
       const head = await git(after.worktreePath, ['rev-parse', 'HEAD']);
@@ -186,7 +186,7 @@ for (const checkpoint of ['effect:terminal-comment', 'effect:terminal-labels']) 
       assert.equal(after.terminalNotifications!.labels.status, 'delivered');
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
       for (const event of ['implementation', 'terminal-comment', 'terminal-labels']) assert.equal(events.filter((value) => value === event).length, 1, events.join(','));
-      assert.equal(events.some((event) => ['host-check:first', 'host-check:second', 'review', 'commit', 'push', 'pr'].includes(event)), false);
+      assert.equal(events.some((event) => ['host-check:check:first', 'host-check:check:second', 'review', 'commit', 'push', 'pr'].includes(event)), false);
       const remote = JSON.parse(await readFile(join(root, 'github.json'), 'utf8'));
       assert.equal(remote.comments.filter((comment: { body: string }) => comment.body.split('\n')[0]!.endsWith(':blocked -->')).length, 1);
     } finally {
@@ -243,7 +243,7 @@ for (const scenario of [
       assert.equal(await git(after.worktreePath, ['rev-parse', 'HEAD']), original.reviewFeedback!.previousPublishedHeadSha);
       assert.equal(after.reviewFeedback!.consumedSourceIds.filter((id) => id === 'issue-comment:90071992547409939999').length, 1);
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'host-check:first', 'host-check:second', 'proof', 'review', 'commit', 'push', 'pr', 'answer-agent']) assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
+      for (const event of ['implementation', 'host-check:check:first', 'host-check:check:second', 'proof', 'review', 'commit', 'push', 'pr', 'answer-agent']) assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
       const finalRemote = JSON.parse(await readFile(remotePath, 'utf8'));
       const expectedComments = (scenario.revoke || scenario.close) && scenario.checkpoint === 'before:answer-comment' ? 0 : 1;
       assert.equal(finalRemote.comments.filter((comment: { body: string }) => comment.body.split('\n')[0] === marker).length, expectedComments);

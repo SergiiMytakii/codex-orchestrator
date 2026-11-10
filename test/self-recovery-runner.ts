@@ -21,7 +21,7 @@ export function recoveryConfig(): AgentAutoConfig {
     github: { owner: 'owner', repo: 'repo', baseBranch: 'main', labels: { auto: label('agent:auto'), running: label('agent:running'), blocked: label('agent:blocked'), review: label('agent:review') } },
     runner: { checkExecution: 'host', workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60 },
     codex: { command: 'codex', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },
-    checks: { first: 'test -f feature.txt && printf first', second: 'test -f feature.txt && printf second' }, proof: { artifactDir: '.codex-orchestrator/proofs' }, deny: { readPaths: [], commands: [] },
+    checks: { 'check:first': 'test -f feature.txt && printf first', 'check:second': 'test -f feature.txt && printf second' }, proof: { artifactDir: '.codex-orchestrator/proofs' }, deny: { readPaths: [], commands: [] },
   };
 }
 
