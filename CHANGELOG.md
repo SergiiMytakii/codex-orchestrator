@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.43] - 2026-11-10
+
 ### Fixed
 
 - Recover local Runner ownership after a host reboot.
