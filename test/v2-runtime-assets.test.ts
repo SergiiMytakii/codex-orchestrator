@@ -277,7 +277,7 @@ test('contained owner preserves the concrete process barrier reason on safe halt
   }
 });
 
-test('host owner receives the same trusted baseline exception enforced by completion', async () => {
+test('host owner must diagnose and repair failing related tests in the same session', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-host-prompt-'));
   const worktree = join(root, 'worktree'); await mkdir(worktree);
   const workflowGeneration = await materializeWorkflowGeneration({
@@ -291,11 +291,10 @@ test('host owner receives the same trusted baseline exception enforced by comple
     git: { snapshot: async () => runtimeFreshness() } as never });
   await agent.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'host-baseline',
     runnerChecks: { status: 'complete', sourceSha256: 'a'.repeat(64), policySha256: 'b'.repeat(64), results: [] } });
-  assert.match(prompt, /Runner baseline evidence is the only exception/u);
-  assert.match(prompt, /identical failures in unchanged tests on the immutable base/u);
-  assert.match(prompt, /reporting all baseline failures as residual risks/u);
-  assert.match(prompt, /each required host check passed or has trusted baseline evidence/u);
-  assert.doesNotMatch(prompt, /only after all required host checks passed/u);
+  assert.match(prompt, /even when the failure already exists on the base/u);
+  assert.match(prompt, /fix the code or correct the test/u);
+  assert.match(prompt, /Never broaden the test scope/u);
+  assert.match(prompt, /only after every required host check passes/u);
 });
 
 test('legacy config owner without receipts requests host checks and receives artifact admission limits', async () => {

@@ -1,4 +1,5 @@
 import { posix } from 'node:path';
+import type { RelatedResources } from './affected-test-paths.js';
 
 const MAX_STRING_LENGTH = 16 * 1024;
 const MAX_DESCRIPTION_LENGTH = 4 * 1024;
@@ -44,6 +45,7 @@ export interface AgentAutoConfig {
     branchTemplate: 'codex/issue-${issueNumber}';
     pollIntervalSeconds: number;
     checkExecution?: 'host';
+    relatedResources?: RelatedResources;
   };
   codex: {
     command: string;
@@ -80,8 +82,16 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
     'branchTemplate',
     'pollIntervalSeconds',
     ...(value.runner && typeof value.runner === 'object' && 'checkExecution' in value.runner ? ['checkExecution'] : []),
+    ...(value.runner && typeof value.runner === 'object' && 'relatedResources' in value.runner ? ['relatedResources'] : []),
   ], 'config.runner');
   if ('checkExecution' in value.runner && value.runner.checkExecution !== 'host') throw new Error('config.runner.checkExecution must be host');
+  if ('relatedResources' in value.runner) {
+    assertRecord(value.runner.relatedResources, 'config.runner.relatedResources');
+    const entries = Object.entries(value.runner.relatedResources);
+    if (!entries.length || entries.some(([key]) => !['imageRoot', 'publicRoot', 'catalogRoot'].includes(key)))
+      throw new Error('config.runner.relatedResources is invalid');
+    for (const [key, path] of entries) assertRepositoryRelativePath(path, `config.runner.relatedResources.${key}`);
+  }
   assertRepositoryRelativePath(value.runner.workspaceRoot, 'config.runner.workspaceRoot');
   assertRepositoryRelativePath(value.runner.stateDir, 'config.runner.stateDir');
   if (value.runner.branchTemplate !== 'codex/issue-${issueNumber}') throw new Error('config.runner.branchTemplate is invalid');

@@ -30,10 +30,10 @@ test('failed configured check retains stdout and stderr and prevents dependent c
   const root = await mkdtemp(join(tmpdir(), 'runner-checks-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const results = await runConfiguredChecks({ checks: {
-    prepare: 'printf ready', test: 'printf failure >&2; exit 9', later: 'exit 0',
+    prepare: 'printf ready', check: 'printf failure >&2; exit 9', later: 'exit 0',
   }, worktreePath: root, logRoot: join(root, 'logs'), timeoutMs: 5000,
     signal: new AbortController().signal, env: process.env });
-  assert.deepEqual(results.map(r => [r.id, r.exitCode]), [['prepare', 0], ['test', 9]]);
+  assert.deepEqual(results.map(r => [r.id, r.exitCode]), [['prepare', 0], ['check', 9]]);
   assert.equal(await readFile(results[1]!.logPath, 'utf8'), 'failure');
 });
 
@@ -93,4 +93,21 @@ test('cold host checks load private repository settings without touching a workt
   assert.deepEqual(buildHostCheckEnvironment({ A: 'b' }, join(root, 'absent.json')), { A: 'b' });
   await writeFile(settings, JSON.stringify({ DB_NAME: 42 }));
   assert.throws(() => buildHostCheckEnvironment({}, settings), /Invalid private Runner environment/);
+});
+
+test('opaque test frameworks require an explicit project selector with the pinned base', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-scoped-command-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const baseSha = 'a'.repeat(40);
+  const input = { baseSha, worktreePath: root, timeoutMs: 5000, signal: new AbortController().signal, env: process.env };
+  const command = 'printf "selected by project: %s" "$CODEX_ORCHESTRATOR_BASE_SHA"';
+  const [blocked] = await runConfiguredChecks({ ...input, logRoot: join(root, 'unknown'), checks: { test: command } });
+  assert.equal(blocked!.exitCode, 1);
+  assert.doesNotMatch(await readFile(blocked!.logPath, 'utf8'), /selected by project:/u);
+  const [alias] = await runConfiguredChecks({ ...input, logRoot: join(root, 'alias'), checks: { verify: command } });
+  assert.equal(alias!.exitCode, 1);
+  assert.doesNotMatch(await readFile(alias!.logPath, 'utf8'), /selected by project:/u);
+  const [selected] = await runConfiguredChecks({ ...input, logRoot: join(root, 'scoped'), checks: { 'affected-test': command } });
+  assert.equal(selected!.exitCode, 0);
+  assert.equal(await readFile(selected!.logPath, 'utf8'), `selected by project: ${baseSha}`);
 });

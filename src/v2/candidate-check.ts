@@ -1,91 +1,53 @@
-/** Owner-invoked check: native related Jest selection, conservative full-command fallback. */
+/** Owner-invoked Jest check. A missing selection never runs the full suite. */
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
-import { constants } from 'node:os';
-import { stripVTControlCharacters } from 'node:util';
-import { isAbsolute, join, relative, resolve } from 'node:path';
-import JSON5 from 'json5';
-import { jestCommand, jestConfigurationProblem, parseJestConfig, type JestConfigurationProblem } from './jest-command.js';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { constants, tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { expandRelatedResources, isDocumentationPath, type RelatedResources } from './affected-test-paths.js';
+import { jestCommand } from './jest-command.js';
 
-const [base, command, reportPath] = process.argv.slice(2);
+const [base, command, resourceRules] = process.argv.slice(2);
 if (!base || !/^(?:HEAD|[0-9a-f]{40})$/u.test(base) || !command) throw new Error('Expected base SHA and configured command.');
 const cwd = process.cwd();
-let args: string[] | undefined;
-try { args = relatedJestArgs(); } catch { /* Unknown scope retains the entire configured command. */ }
-console.log(`Owner check: ${JSON.stringify({ command, invocation: args ? ['npm', ...args] : command, scope: args ? 'related-jest' : 'full' })}`);
-if (reportPath && !args) {
-  const result = runWithJestLog('/bin/sh', ['-c', command]);
-  process.exitCode = exitCode(result);
-  if (result.status === 1) collectJestReport(result.stderr);
+let selection: { args: string[]; editedTests: string[]; resourceTests: Map<string, string[]> } | 'documentation' | undefined;
+try { selection = await relatedJestArgs(); }
+catch (error) {
+  console.error('Runner: could not inspect the candidate or resolve Jest configuration:', error instanceof Error ? error.message : error);
+}
+if (!selection) {
+  console.error('Runner: cannot determine related tests. Configure an affected-test command for this project.');
+  process.exitCode = 1;
+} else if (selection === 'documentation') {
+  console.log('Runner: no related tests for a documentation-only change.');
 } else {
-  const result = args ? spawnSync('npm', args, { stdio: 'inherit' }) : spawnSync('/bin/sh', ['-c', command], { stdio: 'inherit' });
-  process.exitCode = exitCode(result);
-  if (reportPath && result.status === 1) writeMarker('affected-suite');
-}
-
-function runWithJestLog(program: string, args: string[]) {
-  const result = spawnSync(program, args, { encoding: 'utf8', stdio: ['inherit', 'inherit', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
-  if (result.stderr) process.stderr.write(result.stderr);
-  return result;
-}
-
-function exitCode(result: Pick<ReturnType<typeof spawnSync>, 'status' | 'signal'>): number {
-  if (result.status !== null) return result.status;
-  console.error(`Owner check: child did not exit normally${result.signal ? ` (${result.signal})` : ''}.`);
-  return result.signal ? 128 + constants.signals[result.signal] : 125;
-}
-
-function writeMarker(reason: JestConfigurationProblem | 'affected-suite' | 'candidate-report' | 'replay-mismatch'): void {
-  writeFileSync(reportPath + '.reason', reason, { mode: 0o600, flag: 'wx' });
-}
-
-function collectJestReport(ordinaryLog: string): void {
-  let problem: JestConfigurationProblem | 'candidate-report' | 'replay-mismatch' = 'configuration-output';
+  const reportDir = mkdtempSync(join(tmpdir(), 'codex-related-jest-'));
   try {
-    const parsed = jestCommand(cwd, command!);
-    if (parsed) {
-      const machine = ['--json', '--outputFile', reportPath!];
-      const checkConfig = (flags: string[]) => {
-        const probe = spawnSync('npm', ['--silent', ...parsed.npmArgs, '--', ...parsed.extra, '--showConfig', ...flags],
-          { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
-        return probe.status === 0 ? jestConfigurationProblem(parseJestConfig(probe.stdout)) : 'configuration-output';
-      };
-      const refusal = checkConfig([]) ?? checkConfig(machine);
-      if (refusal) problem = refusal;
-      else {
-        const replay = runWithJestLog('npm', [...parsed.npmArgs, '--', ...parsed.extra, ...machine]);
-        if (replay.status === 1) {
-          const expected = jestFailureTranscript(ordinaryLog);
-          if (expected && expected === jestFailureTranscript(replay.stderr)) return;
-          problem = 'replay-mismatch';
-        } else {
-          if (replay.status === null) process.exitCode = exitCode(replay);
-          problem = 'candidate-report';
-        }
-      }
-    }
-  } catch { /* Keep the result of the original check. */ }
-  writeMarker(problem);
+    const report = join(reportDir, 'results.json');
+    const args = [...selection.args, '--json', '--outputFile', report];
+    console.log(`Owner check: ${JSON.stringify({ command, invocation: ['npm', ...args], scope: 'related-jest' })}`);
+    const result = spawnSync('npm', args, { stdio: 'inherit' });
+    process.exitCode = result.status ?? (result.signal ? 128 + constants.signals[result.signal] : 125);
+    if (process.exitCode === 0 && !passingRelatedTests(report, selection.editedTests, selection.resourceTests)) process.exitCode = 1;
+  } finally {
+    rmSync(reportDir, { recursive: true, force: true });
+  }
 }
 
-function jestFailureTranscript(log: string): string | undefined {
-  const reportNotice = 'Test results written to: ';
-  const cleaned = stripVTControlCharacters(log).replace(/\r\n/gu, '\n')
-    .split('\n').filter(line => !line.startsWith(reportNotice)
-      || resolve(cwd, line.slice(reportNotice.length)) !== resolve(reportPath!)).join('\n');
-  const summaryStart = cleaned.lastIndexOf('\nTest Suites:');
-  if (summaryStart < 0 || !/^Tests:\s+\d+ failed(?:,|$)/mu.test(cleaned.slice(summaryStart))) return;
-  const summary = cleaned.slice(summaryStart).replace(/^Time:\s+.*\n/mu, '').trim();
-  const output = cleaned.slice(0, summaryStart);
-  const firstSuite = output.search(/^(?:FAIL|PASS|SKIP) /mu);
-  if (firstSuite < 0) return;
-  const prefix = output.slice(0, firstSuite).trim();
-  const suites = output.slice(firstSuite).split(/(?=^(?:FAIL|PASS|SKIP) )/mu);
-  if (!suites.some(suite => suite.startsWith('FAIL '))) return;
-  // Worker completion order and timing can change. Preserve each suite's full
-  // assertion output and the summary so a different failure cannot be waived.
-  const blocks = suites.map(suite => suite.replace(/^((?:FAIL|PASS|SKIP) .+) \(\d+(?:\.\d+)? s\)(?=\n|$)/u, '$1').trimEnd());
-  return JSON.stringify([prefix, blocks.sort(), summary]);
+function passingRelatedTests(report: string, editedTests: string[], resourceTests: Map<string, string[]>): boolean {
+  try {
+    const result = JSON.parse(readFileSync(report, 'utf8'));
+    if (result.success === true && result.numPassedTests > 0 && Array.isArray(result.testResults)) {
+      const passing = new Set(result.testResults.filter((suite: { assertionResults: Array<{ status: string }> }) => suite.assertionResults.some(test => test.status === 'passed'))
+        .map((suite: { name: string }) => relative(cwd, suite.name)));
+      const skipped = editedTests.filter(file => !passing.has(file));
+      const unverifiedResources = [...resourceTests].filter(([, tests]) => !tests.some(test => passing.has(test))).map(([file]) => file);
+      if (skipped.length) console.error(`Runner: edited Jest suites must execute successfully: ${skipped.join(', ')}.`);
+      if (unverifiedResources.length) console.error(`Runner: no passing Jest suite for resources: ${unverifiedResources.join(', ')}.`);
+      return !skipped.length && !unverifiedResources.length;
+    }
+  } catch { /* Missing or incomplete test output cannot establish passing coverage. */ }
+  console.error('Runner: related Jest verification did not record any passing tests.');
+  return false;
 }
 
 function git(args: string[]): string[] {
@@ -94,61 +56,80 @@ function git(args: string[]): string[] {
   return result.stdout.split('\0').filter(Boolean);
 }
 
-function relatedJestArgs(): string[] | undefined {
+async function relatedJestArgs(): Promise<typeof selection> {
   const parsed = jestCommand(cwd, command!);
   if (!parsed) return;
-  const { flags, pkg, npmArgs, extra } = parsed;
-  const files = [...new Set([...git(['diff', '--no-renames', '--name-only', '-z', base!, '--']),
+  const { flags, npmArgs, extra } = parsed;
+  const diff = [...new Set([...git(['diff', '--no-renames', '--name-only', '-z', base!, '--']),
     ...git(['ls-files', '--others', '--exclude-standard', '-z'])])].sort();
-  if (!files.length) return;
+  if (!diff.length) return;
+  const candidate = diff.filter(file => !isDocumentationPath(file));
+  const rules = resourceRules ? JSON.parse(resourceRules) as RelatedResources : undefined;
+  const expanded = rules ? await expandRelatedResources({ root: cwd, changed: candidate,
+    paths: git(['ls-files', '--cached', '--others', '--exclude-standard', '-z']),
+    rules, language: 'jest',
+  }) : undefined;
+  const files = expanded?.paths ?? candidate;
+  if (!files.length) return 'documentation';
   const sources: string[] = [];
   for (const file of files) {
+    const importedCatalog = rules?.catalogRoot && file.startsWith(rules.catalogRoot + '/') && file.endsWith('.json');
     if (file.startsWith('-') || isAbsolute(file) || file.split('/').some(part => part === '..')
-      || !/\.(?:[cm]?[jt]s|[jt]sx)$/u.test(file)
-      || /(?:^|\/)[^/]*(?:config|setup)[^/]*$/iu.test(file)) return;
+      || (!importedCatalog && !/\.(?:[cm]?[jt]s|[jt]sx)$/u.test(file))
+      || /(?:^|\/)jest\.(?:config|setup)\.[cm]?[jt]s$/iu.test(file)) return;
     const stat = lstatSync(join(cwd, file));
     if (!stat.isFile() || stat.isSymbolicLink()) return;
     sources.push(`./${file}`);
   }
-  if (!sources.length || !staticConfig(flags, pkg)) return;
+  if (!sources.length) return;
   // Probe through npm so ancestor-installed Jest resolves exactly as in the real check.
   const probe = spawnSync('npm', [...npmArgs, '--', ...extra, '--showConfig'], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
-  if (probe.status !== 0) return;
+  if (probe.status !== 0) {
+    process.stderr.write(probe.stderr || probe.error?.message || 'Could not resolve Jest configuration.\n');
+    return;
+  }
   const config = JSON.parse(probe.stdout.slice(probe.stdout.indexOf('{')));
   if (!Array.isArray(config.configs) || !config.configs.length || !config.globalConfig
     || ['lastCommit', 'onlyChanged', 'changedSince', 'changedFilesWithAncestor', 'onlyFailures', 'watch', 'watchAll', 'listTests', 'runTestsByPath', 'filter', 'shard']
       .some(key => config.globalConfig[key])
     || (config.globalConfig.testFailureExitCode !== undefined && config.globalConfig.testFailureExitCode <= 0)
     || [...config.configs, config.globalConfig].some(localGlobalModule)) return;
-  return [...npmArgs, '--', ...extra, '--passWithNoTests=false', '--findRelatedTests', ...sources];
-}
-
-function staticConfig(flags: string[], pkg: { jest?: unknown }): boolean {
-  let explicit: string | undefined;
-  for (let i = 0; i < flags.length; i++) {
-    if (flags[i] === '--config') explicit = flags[++i];
-    else if (flags[i]!.startsWith('--config=')) explicit = flags[i]!.slice(9);
+  const explicitConfig = flags.flatMap((flag, i) => flag === '--config' ? [flags[i + 1]]
+    : flag.startsWith('--config=') ? [flag.slice('--config='.length)] : []);
+  const setupPaths = config.configs.flatMap((project: { setupFilesAfterEnv?: string[] }) => project.setupFilesAfterEnv ?? []);
+  const changedPaths = new Set(files.map(file => resolve(cwd, file)));
+  if ([...explicitConfig, ...setupPaths].some(path => path && changedPaths.has(resolve(cwd, path)))) return;
+  // Refuse changed paths outside the resolved module roots. An aggregate
+  // related query can otherwise quietly omit them when other files match.
+  const roots = config.configs.flatMap((project: { roots?: string[] }) => project.roots ?? [cwd]);
+  if (sources.some(file => !roots.some((root: string) => {
+    const within = relative(root, join(cwd, file));
+    return within !== '..' && !within.startsWith('..' + sep) && !isAbsolute(within);
+  }))) return;
+  // A test for a second asset must not hide an untested resource dependency.
+  const checked = new Map<string, string[]>();
+  const resourceTests = new Map<string, string[]>();
+  const groups = expanded?.resources ?? new Map<string, Set<string>>();
+  for (const file of files) {
+    if (rules?.catalogRoot && file.startsWith(rules.catalogRoot + '/') && file.endsWith('.json')) groups.set(file, new Set([file]));
   }
-  const files = explicit ? [resolve(cwd, explicit)] : ['js', 'cjs', 'mjs', 'ts', 'cts', 'json']
-    .map(ext => join(cwd, `jest.config.${ext}`)).filter(existsSync);
-  let config: unknown;
-  if (!files.length && !explicit) config = pkg.jest;
-  else {
-    if (files.length !== 1 || (!explicit && pkg.jest !== undefined)) return false;
-    const file = files[0]!;
-    if (relative(cwd, file).startsWith('..') || /(?:^|\/)\.env(?:\.|$)/u.test(file)) return false;
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.size > 5 * 1024 * 1024) return false;
-    const source = readFileSync(file, 'utf8');
-    if (file.endsWith('.json')) config = JSON5.parse(source);
-    else {
-      const body = source.replace(/^(?:\s|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/u, '');
-      const literal = /^(?:module\.exports\s*=|export\s+default)\s*([\s\S]*?)\s*;?\s*$/u.exec(body);
-      if (!literal) return false;
-      config = JSON5.parse(literal[1]!);
+  for (const [resource, dependencies] of groups) {
+    const inputs = [...dependencies].sort().map(path => `./${path}`);
+    const key = JSON.stringify(inputs);
+    let paths = checked.get(key);
+    if (!paths) {
+      const listed = spawnSync('npm', ['--silent', ...npmArgs, '--', ...extra,
+        '--listTests', '--json', '--findRelatedTests', ...inputs], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
+      const related: unknown = listed.status === 0 ? JSON.parse(listed.stdout) : undefined;
+      if (!Array.isArray(related) || !related.length || related.some(path => typeof path !== 'string' || !isAbsolute(path)))
+        throw new Error(`Jest found no related tests for resource ${resource}.`);
+      paths = related.map(path => relative(cwd, path));
+      checked.set(key, paths);
     }
+    resourceTests.set(resource, paths);
   }
-  return !!config && typeof config === 'object' && !Array.isArray(config) && !('preset' in config) && !('projects' in config);
+  const editedTests = files.filter(file => /(?:^|\/)__tests__\/|\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(file));
+  return { args: [...npmArgs, '--', ...extra, '--passWithNoTests=false', '--findRelatedTests', ...sources], editedTests, resourceTests };
 }
 
 function localGlobalModule(config: Record<string, unknown>): boolean {
@@ -158,5 +139,5 @@ function localGlobalModule(config: Record<string, unknown>): boolean {
     return typeof value === 'string' && isAbsolute(value) && !value.includes('/node_modules/')
       && existsSync(value) && lstatSync(value).isFile();
   };
-  return Object.entries(config).some(([key, value]) => key !== 'moduleNameMapper' && local(value));
+  return Object.entries(config).some(([key, value]) => key !== 'moduleNameMapper' && key !== 'setupFilesAfterEnv' && local(value));
 }

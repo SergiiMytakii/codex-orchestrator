@@ -23,39 +23,3 @@ export function jestCommand(cwd: string, command: string) {
   const npmArgs = script === 'test' ? ['test'] : ['run', script];
   return { npmArgs, extra: match[3]?.split(/\s+/u) ?? [], flags, pkg };
 }
-
-
-export function parseJestConfig(log: string): unknown {
-  return JSON.parse(log.slice(log.indexOf('{'), log.lastIndexOf('}') + 1));
-}
-
-function object(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-export type JestConfigurationProblem = 'configuration-output' | 'configuration-selection' | 'configuration-coverage'
-  | 'configuration-reporting' | 'configuration-hooks';
-
-export function jestConfigurationProblem(value: unknown): JestConfigurationProblem | undefined {
-  if (!object(value) || !object(value.globalConfig) || !Array.isArray(value.configs) || !value.configs.length)
-    return 'configuration-output';
-  const global = value.globalConfig;
-  if (['bail', 'changedSince', 'filter', 'findRelatedTests', 'lastCommit', 'listTests', 'onlyChanged', 'onlyFailures',
-    'passWithNoTests', 'randomize', 'runTestsByPath', 'shard', 'testNamePattern', 'watch', 'watchAll'].some(key => global[key]))
-    return 'configuration-selection';
-  const defaultReporters = (entry: unknown): boolean => entry === undefined
-    || (Array.isArray(entry) && entry.length === 1 && Array.isArray(entry[0]) && entry[0][0] === 'default');
-  const hooks = ['dependencyExtractor', 'globalSetup', 'globalTeardown', 'resolver', 'runner', 'runtime',
-    'setupFiles', 'setupFilesAfterEnv', 'snapshotResolver', 'snapshotSerializers', 'testEnvironment',
-    'testRunner', 'testSequencer', 'transform'];
-  const hasLocalModule = (entry: unknown): boolean => {
-    if (Array.isArray(entry)) return entry.some(hasLocalModule);
-    return typeof entry === 'string' && isAbsolute(entry) && !entry.includes('/node_modules/');
-  };
-  for (const config of [global, ...value.configs] as unknown[]) {
-    if (!object(config)) return 'configuration-output';
-    if (config.collectCoverage || config.coverageThreshold) return 'configuration-coverage';
-    if (config.testResultsProcessor || !defaultReporters(config.reporters)) return 'configuration-reporting';
-    if (hooks.some(hook => hasLocalModule(config[hook]))) return 'configuration-hooks';
-  }
-}

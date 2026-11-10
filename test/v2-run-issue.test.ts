@@ -41,7 +41,7 @@ import { mkdtemp } from './mission-test-temp.js';
 const execFileAsync = promisify(execFile);
 
 test('host checks run before proof and resume the same owner with trusted receipts', async () => {
-  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf host-passed' },
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: 'printf host-passed' },
     implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request',
       summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } }] });
   const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
@@ -58,7 +58,7 @@ test('host checks run before proof and resume the same owner with trusted receip
 
 test('blocked terminal reports the last host failure separately from a private blocker reason', async () => {
   const summary = 'Expected /abort/i; see /Users/private/0-test.log.';
-  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'exit 9' },
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: 'exit 9' },
     implementationResults: [
       { kind: 'completed', report: { version: 1, status: 'checks-request',
         summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } },
@@ -73,7 +73,7 @@ test('blocked terminal reports the last host failure separately from a private b
   const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'))?.body ?? '';
   assert.match(comment, /Kind: out-of-scope/u);
   assert.match(comment, /## Reason\nReason: .*detailed reason was withheld/u);
-  assert.match(comment, /## Retained work and state\n- Last recorded host check failure: "test" exit code 9/u);
+  assert.match(comment, /## Retained work and state\n- Last recorded host check failure: "check" exit code 9/u);
   assert.match(comment, /## Next action\nProvide the missing decision or authority/u);
   assert.match(comment, /Inspect the retained Runner check log/u);
   assert.doesNotMatch(comment, /Users\/private|Terminal summary is unavailable/u);
@@ -106,7 +106,7 @@ for (const unsafePath of [false, true]) {
 }
 
 for (const framework of ['Jest', 'Flutter'] as const) for (const wrongBase of [false, true]) {
-  test(`host completion ${wrongBase ? 'rejects stale' : 'admits confirmed unrelated'} ${framework} baseline evidence`, async () => {
+  test(`host completion rejects ${wrongBase ? 'stale' : 'matching'} historical ${framework} baseline evidence`, async () => {
     const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: framework === 'Jest' ? 'npm test' : 'flutter test --no-pub' },
       implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request',
         summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } }] });
@@ -117,8 +117,8 @@ for (const framework of ['Jest', 'Flutter'] as const) for (const wrongBase of [f
         failures: [{ test: framework === 'Jest' ? 'src/unrelated.test.ts :: old failure' : 'test/unrelated_test.dart :: old failure', errorSha256: sha256('same failure') }] } }];
     const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
     assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
-    assert.equal((await fixture.runner.runIssue(input)).status, wrongBase ? 'blocked' : 'review-ready');
-    assert.equal(fixture.events.includes('git:push'), !wrongBase);
+    assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+    assert.equal(fixture.events.includes('git:push'), false);
   });
 }
 
@@ -133,7 +133,7 @@ test('host mode rejects worker-only receipts without trusted command execution',
 
 for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged-output'] as const) {
   test(`host evidence rejects ${failure} before publication`, async () => {
-    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: failure === 'failed-command' ? 'exit 9' : 'printf host-passed' },
+    const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: failure === 'failed-command' ? 'exit 9' : 'printf host-passed' },
       implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } }] });
     const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
     assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
@@ -141,7 +141,7 @@ for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged
       fixture.options.agentWrites = false;
       await writeFile(join(fixture.worktreePath, 'feature.txt'), 'source changed after host checks');
     }
-    if (failure === 'policy-drift') (await fixture.dependencies.readConfig(fixture.targetRoot)).config.checks.test = 'printf different-policy';
+    if (failure === 'policy-drift') (await fixture.dependencies.readConfig(fixture.targetRoot)).config.checks.check = 'printf different-policy';
     if (failure === 'forged-output') {
       const implement = fixture.dependencies.implementationAgent.run;
       fixture.dependencies.implementationAgent.run = async request => {
@@ -158,7 +158,7 @@ for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged
 }
 
 test('interrupted settled host checks retry in the same run without blocking', async () => {
-  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { check: 'printf passed' },
     implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
   const runChecks = fixture.dependencies.configuredChecks!.run;
   fixture.dependencies.configuredChecks!.run = async () => { throw Object.assign(new Error('temporary log access'), { code: 'EIO' }); };
@@ -180,7 +180,7 @@ test('interrupted settled host checks retry in the same run without blocking', a
 });
 
 test('pending host checks wait for ownership and reject protected-path drift across restart', async () => {
-  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf passed' },
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: 'printf passed' },
     implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
   let calls = 0;
   fixture.dependencies.configuredChecks!.run = async () => { calls++; throw Object.assign(new Error('temporary execution failure'), { code: 'EIO' }); };
@@ -196,7 +196,7 @@ test('pending host checks wait for ownership and reject protected-path drift acr
 });
 
 test('legacy interrupted checks without protected-path evidence never adopt current bytes or duplicate notices', async () => {
-  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { check: 'printf passed' },
     implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
   (await fixture.dependencies.readConfig(fixture.targetRoot)).config.deny.readPaths = ['private-state.json'];
   let calls = 0;
@@ -219,7 +219,7 @@ test('legacy interrupted checks without protected-path evidence never adopt curr
 });
 
 test('legacy interrupted checks with no protected paths resume without an unnecessary evidence gate', async () => {
-  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { test: 'printf passed' },
+  const fixture = await runFixture({ fileBackedStore: true, hostChecks: true, configuredChecks: { check: 'printf passed' },
     implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Run checks', changedFiles: ['feature.txt'], residualRisks: [] } }] });
   const runChecks = fixture.dependencies.configuredChecks!.run;
   fixture.dependencies.configuredChecks!.run = async () => { throw new Error('interrupted'); };
@@ -239,7 +239,7 @@ test('legacy interrupted checks with no protected paths resume without an unnece
 
 test('explicit host check request can retry unchanged source after environment repair', async () => {
   const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } };
-  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'test -f ../environment-ready' },
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: 'test -f ../environment-ready' },
     implementationResults: [structuredClone(request), structuredClone(request)] });
   const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
   await fixture.runner.runIssue(input);
@@ -253,11 +253,36 @@ test('explicit host check request can retry unchanged source after environment r
   assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
 });
 
+test('same owner repairs a failed affected check, requests a fresh run and reaches review', async () => {
+  const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Check affected behavior', changedFiles: ['feature.txt'], residualRisks: [] } };
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { 'affected-test': 'grep -qx repaired feature.txt' },
+    implementationResults: [structuredClone(request), structuredClone(request)] });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const implement = fixture.dependencies.implementationAgent.run;
+  let before: Awaited<ReturnType<typeof fixture.store.read>>['runs'][number] | undefined;
+  fixture.dependencies.implementationAgent.run = async invocation => {
+    if (invocation.runnerChecks?.results[0]?.exitCode === 1) {
+      before = (await fixture.store.read()).runs[0]!;
+      assert.equal(invocation.sessionId, before.codexSession?.id);
+      fixture.options.agentWrites = false;
+      await writeFile(join(fixture.worktreePath, 'feature.txt'), 'repaired\n');
+    }
+    return implement(invocation);
+  };
+  assert.equal((await fixture.runner.runThroughHostChecks(input)).status, 'review-ready');
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.ok(before);
+  assert.equal(after.runnerChecks?.results[0]?.exitCode, 0);
+  assert.notEqual(after.runnerChecks?.sourceSha256, before.runnerChecks?.sourceSha256);
+  assert.deepEqual(after.codexSession, before.codexSession);
+  assert.equal(after.cycle, before.cycle);
+});
+
 test('corrected host request clears report-only recovery before proof and Review', async () => {
   const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } };
   const malformed = structuredClone(request) as any;
   delete malformed.report.residualRisks;
-  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf passed' },
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { check: 'printf passed' },
     implementationResults: [malformed, request] });
   const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
   await fixture.runner.runIssue(input);
@@ -2382,6 +2407,23 @@ test('invoked publication rejection is resumable, retains pendingEffect, and sta
   assert.equal(state.runs[0]?.lifecycle, 'publishing');
   assert.equal(state.runs[0]?.pendingEffect?.kind, 'initial-push');
   assert.equal(fixture.events.includes('effect:pr'), false);
+});
+
+test('publishing recovery retains its intent but refuses a check accepted under the old waiver', async () => {
+  const fixture = await runFixture({ rejectEffect: 'push', configuredChecks: { 'affected-test': 'printf passed' } });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const state = await fixture.store.read();
+  const record = structuredClone(state.runs[0]!);
+  assert.equal(record.pendingEffect?.kind, 'initial-push');
+  record.runnerChecks!.policySha256 = sha256(canonicalJson([['affected-test', 'printf passed']]));
+  record.runnerChecks!.results[0]!.exitCode = 1;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: [record] });
+  const pushesBefore = fixture.events.filter(event => event === 'git:push').length;
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'transport-failed');
+  assert.equal(fixture.events.filter(event => event === 'git:push').length, pushesBefore);
+  assert.equal(fixture.events.includes('effect:pr'), false);
+  assert.deepEqual((await fixture.store.read()).runs[0]?.pendingEffect, record.pendingEffect);
 });
 
 test('every invoked effect rejection stays resumable with its exact durable pendingEffect', async () => {

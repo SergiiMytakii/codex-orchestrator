@@ -20,23 +20,13 @@ async function fixture(t: TestContext) {
   await writeFile(join(repo, 'lib/other.dart'), 'const other = 1;\n');
   await writeFile(join(repo, 'test/feature_test.dart'), "import 'package:sample/feature.dart';\n");
   await writeFile(join(repo, 'test/other_test.dart'), "import '../lib/other.dart';\n");
+  await writeFile(join(repo, 'test/flutter_test_config.dart'), "import '../lib/other.dart';\n");
   const flutter = join(sdk, 'flutter');
   await writeFile(flutter, `#!/usr/bin/env node
 const fs = require('node:fs');
-if (process.argv[2] === 'pub') process.exit(0);
-if (!process.argv.includes('--machine')) { console.log('Some tests failed.'); process.exit(1); }
-const changed = fs.readFileSync('lib/feature.dart', 'utf8').includes('= 2');
-const emit = value => console.log(JSON.stringify(value));
-emit({type:'start', protocolVersion:'0.1.0'});
-for (const [id,file] of [[1,'feature'],[2,'other']]) {
- emit({type:'suite',suite:{id,path:process.cwd()+'/test/'+file+'_test.dart'}});
- emit({type:'testStart',test:{id,suiteID:id,name:file+' works'}});
- const failed = file === 'other';
- if (failed) emit({type:'error',testID:id,error:'Expected true, actual false',stackTrace:'',isFailure:true});
- emit({type:'testDone',testID:id,result:failed?'failure':'success',skipped:false,hidden:false});
-}
-emit({type:'done',success:false});
-process.exit(1);
+const selected = process.argv.slice(2).filter(arg => arg.endsWith('_test.dart'));
+console.log('Flutter suites: ' + (selected.join(' ') || 'full suite'));
+process.exit(!selected.length || selected.some(file => fs.readFileSync(file, 'utf8').includes('// failing')) ? 1 : 0);
 `);
   await chmod(flutter, 0o755);
   const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -44,89 +34,107 @@ process.exit(1);
   git('add', '.'); git('commit', '-qm', 'baseline');
   const baseSha = git('rev-parse', 'HEAD');
   await writeFile(join(repo, 'lib/feature.dart'), 'const value = 2;\n');
-  const input = { checks: { test: `'${flutter}' test --no-pub`, after: 'printf reached' }, worktreePath: repo,
+  const input = { checks: { test: `'${flutter}' test --no-pub`, 'check:after': 'printf reached' }, worktreePath: repo,
     baseSha, logRoot: join(root, 'logs'), timeoutMs: 10000, signal: new AbortController().signal, env: process.env };
   return { root, repo, flutter, input, git };
 }
 
-test('confirmed baseline failure outside changed Dart dependencies does not block later host checks', async t => {
+test('Flutter runs only tests that import the changed Dart source', async t => {
   const f = await fixture(t);
+  await writeFile(join(f.repo, 'test/other_test.dart'), "import '../lib/other.dart';\n// failing\n");
+  f.git('add', 'test/other_test.dart'); f.git('commit', '-qm', 'unrelated failing test');
+  // Pin a base with the unrelated test but the original feature source.
+  f.input.baseSha = f.git('rev-parse', 'HEAD');
   const results = await runConfiguredChecks(f.input);
-  assert.deepEqual(results.map(r => r.id), ['test', 'after']);
-  assert.equal(results[0]!.exitCode, 1, 'retain real failed exit status');
-  const baseline = (results[0] as any).baseline;
-  assert.equal(baseline.baseSha, f.input.baseSha);
-  assert.equal(baseline.failures.length, 1);
-  assert.deepEqual(baseline.affectedTests, ['test/feature_test.dart']);
-  assert.match(await readFile(baseline.logPath, 'utf8'), /Expected true/);
-  assert.equal(f.git('status', '--porcelain'), 'M lib/feature.dart', 'baseline execution preserves candidate');
+  assert.deepEqual(results.map(r => [r.id, r.exitCode]), [['test', 0], ['check:after', 0]]);
+  assert.equal((await readFile(results[0]!.logPath, 'utf8')).trim(), 'Flutter suites: test/feature_test.dart');
 });
 
-for (const scenario of ['new-error', 'changed-test-error', 'incomplete-output', 'baseline-prepare-fails', 'unsupported-change', 'no-affected-test', 'unknown-flags'] as const) {
-  test(`Flutter host baseline exception rejects ${scenario}`, async t => {
+test('Flutter related failure blocks later checks, including a failure present on the base', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, 'test/feature_test.dart'), "import '../lib/feature.dart';\n// failing\n");
+  f.git('add', 'test/feature_test.dart'); f.git('commit', '-qm', 'existing failure');
+  f.input.baseSha = f.git('rev-parse', 'HEAD');
+  const results = await runConfiguredChecks(f.input);
+  assert.deepEqual(results.map(r => [r.id, r.exitCode]), [['test', 1]]);
+  assert.equal((await readFile(results[0]!.logPath, 'utf8')).trim(), 'Flutter suites: test/feature_test.dart');
+  assert.equal(results[0]!.baseline, undefined);
+});
+
+for (const scenario of ['unsupported-change', 'uncovered-change', 'unknown-flags'] as const) {
+  test(`Flutter never runs the full suite when selection fails: ${scenario}`, async t => {
     const f = await fixture(t);
-    let sdk = await readFile(f.flutter, 'utf8');
-    if (scenario === 'new-error') sdk = sdk.replace("error:'Expected true, actual false'", "error:changed?'New regression':'Expected true, actual false'");
-    if (scenario === 'changed-test-error') {
-      sdk = sdk.replace("file === 'other'", "true");
-      await writeFile(join(f.repo, 'test/feature_test.dart'), "import 'package:sample/feature.dart';\n// edited regression test\n");
-    }
-    if (scenario === 'incomplete-output') sdk = sdk.replace("emit({type:'done',success:false});", "if (!changed) emit({type:'done',success:false});");
-    if (scenario === 'baseline-prepare-fails') sdk = sdk.replace("process.argv[2] === 'pub') process.exit(0)", "process.argv[2] === 'pub') process.exit(3)");
     if (scenario === 'unsupported-change') await writeFile(join(f.repo, 'pubspec.yaml'), 'name: sample\nversion: 1.0.0\n');
-    if (scenario === 'no-affected-test') await writeFile(join(f.repo, 'lib/untested.dart'), 'const untested = 1;');
-    if (scenario === 'no-affected-test') await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 1;\n');
+    if (scenario === 'uncovered-change') await writeFile(join(f.repo, 'lib/untested.dart'), 'const untested = 1;');
     if (scenario === 'unknown-flags') f.input.checks.test += ' --coverage';
-    await writeFile(f.flutter, sdk);
     const results = await runConfiguredChecks(f.input);
-    assert.deepEqual(results.map(r => r.id), ['test']);
-    assert.equal(results[0]!.exitCode, 1);
-    assert.equal(results[0]!.baseline, undefined);
+    assert.deepEqual(results.map(r => [r.id, r.exitCode]), [['test', 1]]);
+    const log = await readFile(results[0]!.logPath, 'utf8');
+    assert.match(log, /cannot determine related tests/u);
+    assert.doesNotMatch(log, /Flutter suites:/u);
   });
 }
 
-test('conditional exports carry passing affected coverage while new failures remain blocking', async t => {
+test('Flutter includes tests using transitive conditional exports', async t => {
   const f = await fixture(t);
-  await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 1;\n');
   await writeFile(join(f.repo, 'lib/bridge.dart'), "export 'other.dart' if (dart.library.io) 'feature.dart';\n");
   await writeFile(join(f.repo, 'test/other_test.dart'), "import '../lib/bridge.dart';\n");
-  f.git('add', '.'); f.git('commit', '-qm', 'conditional baseline');
+  f.git('add', 'lib/bridge.dart', 'test/other_test.dart'); f.git('commit', '-qm', 'conditional baseline');
   f.input.baseSha = f.git('rev-parse', 'HEAD');
-  await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 2;\n');
-  await writeFile(f.flutter, (await readFile(f.flutter, 'utf8')).replace("error:'Expected true, actual false'", "error:changed?'New regression':'Expected true, actual false'"));
   const results = await runConfiguredChecks(f.input);
-  assert.equal(results[0]!.baseline, undefined, 'transitive baseline import relationships never excuse a new failure');
+  assert.match(await readFile(results[0]!.logPath, 'utf8'), /Flutter suites: test\/feature_test.dart test\/other_test.dart/u);
 });
 
-test('one covered change cannot hide an additional uncovered Dart change', async t => {
-  const f = await fixture(t);
-  await writeFile(join(f.repo, 'lib/uncovered.dart'), 'const extra = 1;');
-  const results = await runConfiguredChecks(f.input);
-  assert.equal(results[0]!.baseline, undefined);
-  assert.deepEqual(results.map(r => r.id), ['test']);
-});
-
-test('commented imports cannot claim passing coverage for changed Dart code', async t => {
+test('a dependency of Flutter shared setup affects every test that loads it', async t => {
   const f = await fixture(t);
   await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 1;\n');
-  await writeFile(join(f.repo, 'test/feature_test.dart'), "// import 'package:sample/feature.dart';\nconst example = \"import '../lib/feature.dart';\";\n");
-  f.git('add', '.'); f.git('commit', '-qm', 'comment is not a dependency');
-  f.input.baseSha = f.git('rev-parse', 'HEAD');
-  await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 2;\n');
-  const results = await runConfiguredChecks(f.input);
-  assert.equal(results[0]!.baseline, undefined);
-  assert.deepEqual(results.map(r => r.id), ['test']);
+  await writeFile(join(f.repo, 'lib/other.dart'), 'const other = 2;\n');
+  const [result] = await runConfiguredChecks(f.input);
+  assert.match(await readFile(result!.logPath, 'utf8'), /Flutter suites: test\/feature_test.dart test\/other_test.dart/u);
 });
 
-test('an edited test needs its own successful execution even when a passing test imports it', async t => {
+test('Flutter links each test to its nearest shared setup', async t => {
   const f = await fixture(t);
   await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 1;\n');
-  await writeFile(join(f.repo, 'test/green_test.dart'), "import 'feature_test.dart';\n");
-  f.git('add', '.'); f.git('commit', '-qm', 'test importer baseline');
+  await mkdir(join(f.repo, 'test/nested'));
+  await writeFile(join(f.repo, 'test/nested/flutter_test_config.dart'), "import '../../lib/feature.dart';\n");
+  await writeFile(join(f.repo, 'test/nested/nested_test.dart'), "import '../../lib/other.dart';\n");
+  f.git('add', '.'); f.git('commit', '-qm', 'nested setup baseline');
   f.input.baseSha = f.git('rev-parse', 'HEAD');
   await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 2;\n');
-  await writeFile(join(f.repo, 'test/feature_test.dart'), "import 'package:sample/feature.dart';\n// edited test\n");
-  await writeFile(f.flutter, (await readFile(f.flutter, 'utf8')).replace("[1,'feature']", "[1,'green']"));
-  const results = await runConfiguredChecks(f.input);
-  assert.equal(results[0]!.baseline, undefined);
+  const [result] = await runConfiguredChecks(f.input);
+  assert.equal((await readFile(result!.logPath, 'utf8')).trim(), 'Flutter suites: test/feature_test.dart test/nested/nested_test.dart');
+});
+
+test('Flutter resolves image and changed catalog keys to related test paths', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.repo, 'assets/images'), { recursive: true });
+  await mkdir(join(f.repo, 'assets/translations'), { recursive: true });
+  await writeFile(join(f.repo, 'assets/images/feature.png'), 'before');
+  await writeFile(join(f.repo, 'assets/translations/en.json'), '{"feature.title":"before","next":"before","other.title":"unchanged"}');
+  await writeFile(join(f.repo, 'lib/feature.dart'), "const image = 'assets/images/feature.png';\nString title(dynamic context) => context.translate('feature.title');\nString next(dynamic context) => context.translate('next');\n");
+  await writeFile(join(f.repo, 'lib/other.dart'), "const cursor = 'next';\n");
+  f.git('add', '.'); f.git('commit', '-qm', 'resource baseline');
+  f.input.baseSha = f.git('rev-parse', 'HEAD');
+  await writeFile(join(f.repo, 'assets/images/feature.png'), 'after');
+  await writeFile(join(f.repo, 'assets/translations/en.json'), '{"feature.title":"after","next":"after","other.title":"unchanged"}');
+  const [result] = await runConfiguredChecks(Object.assign(f.input, {
+    relatedResources: { imageRoot: 'assets/images', catalogRoot: 'assets/translations' },
+  }));
+  assert.equal(result!.exitCode, 0);
+  assert.equal((await readFile(result!.logPath, 'utf8')).trim(), 'Flutter suites: test/feature_test.dart');
+});
+
+test('Flutter selects a catalog parity test using a literal key namespace', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.repo, 'assets/translations'), { recursive: true });
+  await writeFile(join(f.repo, 'assets/translations/en.json'), '{"feature.label":"before"}');
+  await writeFile(join(f.repo, 'test/feature_test.dart'), "const catalog = 'assets/translations/en.json';\nbool inScope(String key) => key.startsWith('feature.');\n");
+  await writeFile(join(f.repo, 'lib/feature.dart'), 'const value = 1;\n');
+  f.git('add', '.'); f.git('commit', '-qm', 'catalog contract baseline');
+  f.input.baseSha = f.git('rev-parse', 'HEAD');
+  await writeFile(join(f.repo, 'assets/translations/en.json'), '{}');
+  const [result] = await runConfiguredChecks(Object.assign(f.input, { relatedResources: { catalogRoot: 'assets/translations' } }));
+  assert.equal(result!.exitCode, 0);
+  assert.equal((await readFile(result!.logPath, 'utf8')).trim(), 'Flutter suites: test/feature_test.dart');
 });

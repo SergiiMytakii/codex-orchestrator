@@ -275,8 +275,8 @@ export async function configureTarget(context, overrides = {}) {
   config.codex.timeoutMs = 600_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.authoritativeCandidate
-      ? { smoke: '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ]' }
-      : { smoke: `${process.execPath} --version` };
+      ? { 'check:smoke': '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ]' }
+      : { 'check:smoke': `${process.execPath} --version` };
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
@@ -549,7 +549,7 @@ export async function runIssueVerificationScenario(context, scenario) {
   const result = await continueRepairReady(() => runIssue(context, issue.number));
   assertResult(result, { status: 'review-ready' }, scenario);
   const record = await readRunRecord(context, issue.number);
-  if (record.checks.length !== 1 || record.checks[0].id !== 'smoke'
+  if (record.checks.length !== 1 || record.checks[0].id !== 'check:smoke'
     || record.checks[0].command !== `${process.execPath} --version` || record.checks[0].status !== 'passed') {
     throw new Error(`${scenario}: Issue text replaced the mandatory configured check receipt`);
   }

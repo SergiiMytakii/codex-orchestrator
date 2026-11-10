@@ -22,8 +22,8 @@ coordinate the supplied reviewer profiles; it has no publication credentials or
 authority.
 
 Candidate file lists describe initial implementation focus. Apply Implement's
-repair gate to related tests, mocks, and fixtures: establish that the failure is
-caused by the current change and the minimal repair preserves the same assertions and authorized outcome.
+repair gate to affected code, tests, mocks, and fixtures: establish the cause
+and show that the minimal repair preserves valid assertions and the authorized outcome.
 Record that evidence before editing; a necessary repair within this authority
 continues without asking for confirmation. Explicit file exclusions and hard allowlists remain binding.
 Do not skip tests, weaken assertions, or change unrelated behavior. If the repair
@@ -34,24 +34,17 @@ When invocation declares host checks, finish source edits and return
 `checks-request` with `version: 1`, `summary`, the complete `changedFiles`, and
 `residualRisks`. Runner executes only its configured commands as ordinary local
 processes, then resumes this same session with trusted `runnerChecks` results.
-Read the full local logs, repair in-scope failures, and request fresh checks after
-source changes. Runner may attach `baseline` evidence to a nonzero Flutter result:
-it confirms identical failures in unchanged tests on the immutable base, with
-all edited tests passing and passing affected-test coverage for every changed
-Dart file. Only this trusted evidence
-makes those failures nonblocking. Report them as residual risks and retain their
-real exit codes and logs; use the candidate output hash in passed completion
-receipts. New failures, failures in edited tests, unknown or unconfirmed failures still require repair or
-a concrete blocker. Complete acceptance proof and independent Review only after
-every configured host check passed or carries that trusted exception on the
-current source. Copy exact ids, commands and output hashes from
-Runner results into completion receipts. Source or command drift invalidates
-those results. Host npm checks also use safe native related Jest selection. In worker-check mode, execute configured commands in the sandbox
-through the supplied owner check executable. It selects native related Jest
-tests from the complete candidate when safe; unsupported commands and uncertain
-scope run in full. Retain its actual invocation in the complete log, with the
-original configured id and command in the receipt. A related failure or empty
-selection cannot pass. Report correction never executes checks.
+Read the full local logs and diagnose any failing related test, including
+failures already present on the base. Fix the code or correct the test against
+the expected behavior, then request fresh host checks. Preserve valid assertions
+and keep all verification, including delegated checks, scoped to affected tests.
+This operation's scope overrides any general full-suite fallback. Stop for a concrete prerequisite
+or authority blocker only after attempting recovery within scope. Complete
+Acceptance Proof and independent Review only after all required checks pass.
+Copy exact ids, commands and output hashes from Runner results into completion
+receipts. Source or command drift invalidates those results. In worker-check
+mode the supplied Jest helper requires a reliable related selection; execute
+non-test checks as configured. Report correction never executes checks.
 
 Return one report matching the supplied implementation output schema. For
 `completed`:
@@ -65,7 +58,7 @@ Return one report matching the supplied implementation output schema. For
   Hash the complete saved logs, not the tool display, which may truncate output.
   Reuse successful saved evidence while the candidate and check policy remain
   unchanged; do not rerun a command solely to recover displayed output.
-  A failed or unavailable mandatory check without trusted Runner baseline evidence cannot authorize completion. Keep
+  A failed or unavailable mandatory check cannot authorize completion. Keep
   command logs local.
 - `proof` is the passed acceptance proof for every supplied frozen criterion,
   with high confidence, concrete evidence references and local artifacts.

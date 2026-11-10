@@ -342,7 +342,8 @@ async function defaultConfig(
     }
   }
   const checks: Record<string, string> = {};
-  if (typeof scripts.test === 'string') checks.test = 'npm test';
+  if (typeof scripts['test:affected'] === 'string') checks['affected-test'] = 'npm run test:affected';
+  else if (typeof scripts.test === 'string') checks.test = 'npm test';
   if (typeof scripts.typecheck === 'string') checks.typecheck = 'npm run typecheck';
   if (flutterExecutable) {
     const flutter = `'${flutterExecutable.replaceAll("'", "'\"'\"'")}'`;

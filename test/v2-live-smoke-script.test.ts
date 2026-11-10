@@ -269,7 +269,7 @@ async function publishedFixture(context: SmokeContext, scenario: string): Promis
   return {
     issueNumber: 7, runId: 'run-7', cycle: 2, checkedChangeSha256: 'checked-1', proofId: 'proof-1',
     proofReceipt: { proofId: 'proof-1' },
-    checks: [{ id: 'smoke', command: `${process.execPath} --version`, status: 'passed', bindingId: 'binding-1', candidateTreeSha: tree }],
+    checks: [{ id: 'check:smoke', command: `${process.execPath} --version`, status: 'passed', bindingId: 'binding-1', candidateTreeSha: tree }],
     codexSession: { id: '019a1435-06c0-7860-8f62-b1faadb9662b' },
     implementationResult: { proof: { status: 'passed' }, review: { reviewers: [
       { role: 'spec_reviewer', sessionId: '019a1435-06c0-7860-8f62-b1faadb9662c', verdict: 'approve' },
@@ -297,13 +297,13 @@ async function wrapperFixture(t: TestContext) {
   const stub = join(context.root, 'codex');
   await writeFile(stub, `#!${process.execPath}\nimport { appendFileSync,writeFileSync } from 'node:fs';\nconst a=process.argv.slice(2);let p='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>p+=c);process.stdin.on('end',()=>{appendFileSync(${JSON.stringify(join(context.root, 'forwarded.jsonl'))},JSON.stringify({args:a,prompt:p})+'\\n');writeFileSync(a[a.indexOf('--output-last-message')+1],JSON.stringify({report:{version:1,status:'model-result',targetFingerprint:'wrong-model-target',coverage:['wrong-model-coverage']}}));});\n`);
   await chmod(stub, 0o700);
-  const invoke = async (scenario: string, operation: string, extra = '', cwd = context.targetRoot, pin = true, checks = { smoke: `${process.execPath} --version` }) => {
+  const invoke = async (scenario: string, operation: string, extra = '', cwd = context.targetRoot, pin = true, checks = { 'check:smoke': `${process.execPath} --version` }) => {
     const reportPath = join(context.root, 'last-report.json');
     const artifacts = join(cwd, '.codex-orchestrator/proof-attempt');
     await mkdir(artifacts, { recursive: true });
     await writeFile(join(artifacts, 'transient.txt'), 'discard me');
     await writeFile(join(cwd, '.codex-orchestrator/sentinel.txt'), 'preserve me');
-    const prompt = `Implement issue\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nRequired configured checks: ${JSON.stringify(checks)}.\nConfigured check receipts: [{"id":"smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
+    const prompt = `Implement issue\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nRequired configured checks: ${JSON.stringify(checks)}.\nConfigured check receipts: [{"id":"check:smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
     const result = await smoke.runCommand(wrapper, ['exec', '--output-last-message', reportPath, '-c', 'model_reasoning_effort="high"', ...(pin ? ['-c', 'model="gpt-5.6-luna"'] : [])], {
       cwd, env: { ...process.env, PATH: `${context.root}:${process.env.PATH ?? ''}` }, stdin: prompt, timeoutMs: 30_000, allowedExitCodes: [0, 1, 64],
     });

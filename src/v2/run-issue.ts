@@ -94,13 +94,15 @@ class ReviewTargetCredentialError extends Error {
   }
 }
 
+const hostChecksReady = Symbol('host-checks-ready');
+
 export type RunIssueResult =
   | { status: 'state-schema-unsupported'; reason?: string }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
   | { status: 'repair-ready'; source: 'check' | 'proof' | 'review'; blockerIds: string[]; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary'; resumable: boolean; evidencePath: string; blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string } }
-  | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
+  | { status: 'transport-failed'; resumable: boolean; evidencePath: string; [hostChecksReady]?: true }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; evidencePath: string }
   | { status: 'requeued'; reason: 'owner-contention'; evidencePath: string }
@@ -201,7 +203,7 @@ export interface RunIssueDependencies {
   };
   reviewFeedback?: ReviewFeedbackObserver;
   git: RunIssueGit;
-  configuredChecks?: { run(input: { checks: Record<string, string>; worktreePath: string; baseSha: string; proofId: string; signal: AbortSignal }): Promise<RunnerCheckResult[]> };
+  configuredChecks?: { run(input: { checks: Record<string, string>; relatedResources?: AgentAutoConfig['runner']['relatedResources']; worktreePath: string; baseSha: string; proofId: string; signal: AbortSignal }): Promise<RunnerCheckResult[]> };
   implementationAgent: {
     run(input: {
       operation: 'implementation';
@@ -1156,6 +1158,16 @@ export class RunIssue {
     return { active };
   }
 
+  /** Advance normal host-check handoffs without retrying transport failures. */
+  async runThroughHostChecks(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
+    let result = await this.runIssue(input);
+    for (let handoffs = 0; handoffs < 5 && !this.signal.aborted
+      && result.status === 'transport-failed' && result[hostChecksReady]; handoffs++) {
+      result = await this.runIssue(input);
+    }
+    return result;
+  }
+
   async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
     let owner: { release(): Promise<void> } | undefined;
     let active: ActiveRun | undefined;
@@ -1597,7 +1609,7 @@ export class RunIssue {
             ? await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), {}) : active;
           active = await this.clearAttempt(active);
           const sourceSha256 = sha256(canonicalJson(await this.dependencies.git.snapshot(worktreePath)));
-          const policySha256 = runnerCheckPolicySha256(config.checks);
+          const policySha256 = runnerCheckPolicySha256(config.checks, config.runner.relatedResources);
           active = await this.persist(active, { lifecycle: 'checking', implementationResult: undefined,
             implementationReportCorrection: undefined, reportRepairs: 0,
             runnerChecks: { status: 'pending', sourceSha256, policySha256, results: [],
@@ -1629,15 +1641,8 @@ export class RunIssue {
         || source.untrackedContentSha256 !== ownerResult.review.untrackedContentSha256))
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'owner-review-source-drift');
       if (config.runner.checkExecution === 'host') {
-        const trusted = active.record.runnerChecks;
-        const baseSha = active.record.baseSha;
-        if (!trusted || trusted.status !== 'complete'
-          || trusted.sourceSha256 !== sha256(canonicalJson(source))
-          || trusted.policySha256 !== runnerCheckPolicySha256(config.checks)
-          || Object.entries(config.checks).some(([id, command]) => !trusted.results.some(result =>
-            result.id === id && result.command === command && runnerCheckAccepted(result, baseSha)
-            && ownerResult.checks?.some(check => check.id === id && check.command === command
-              && check.status === 'passed' && check.outputSha256 === result.outputSha256))))
+        if (active.record.runnerChecks?.sourceSha256 !== sha256(canonicalJson(source))
+          || !hasPassingRunnerChecks(active.record, config))
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'runner-checks-evidence-mismatch');
       }
       const ownerChecks = ownerResult.checks;
@@ -2226,7 +2231,7 @@ export class RunIssue {
     if (observedProtected !== protectedBefore)
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
     const sourceSha256 = sha256(canonicalJson(await this.dependencies.git.snapshot(active.record.worktreePath)));
-    const policySha256 = runnerCheckPolicySha256(config.checks);
+    const policySha256 = runnerCheckPolicySha256(config.checks, config.runner.relatedResources);
     if (sourceSha256 !== pending.sourceSha256 || policySha256 !== pending.policySha256) {
       active = await this.persist(active, { lifecycle: 'implementing', runnerChecks: undefined });
       return this.retryableFailure(active, 'runner-checks-binding-changed', 'The source or check policy changed while checks were interrupted. The same owner must request fresh checks.');
@@ -2235,7 +2240,7 @@ export class RunIssue {
     if (!await this.authorized(active, config)) return this.revoked(active);
     let results: RunnerCheckResult[];
     try {
-      results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath: active.record.worktreePath,
+      results = await this.dependencies.configuredChecks.run({ checks: config.checks, relatedResources: config.runner.relatedResources, worktreePath: active.record.worktreePath,
         baseSha: active.record.baseSha, proofId: active.record.proofId!, signal: this.signal });
     } catch (error) {
       if (await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== protectedBefore)
@@ -2247,7 +2252,8 @@ export class RunIssue {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
     active = await this.persist(active, { lifecycle: 'implementing',
       runnerChecks: { status: 'complete', sourceSha256, policySha256, results, protectedPathsSha256: protectedBefore } });
-    return this.invokedFailure(active, 'runner-checks-ready', 'The next invocation resumes the same Codex session with complete host-check logs and results before proof and independent Review.');
+    const result = await this.invokedFailure(active, 'runner-checks-ready', 'The next invocation resumes the same Codex session with complete host-check logs and results before proof and independent Review.');
+    return { ...result, [hostChecksReady]: true };
   }
 
   private async retryableFailure(active: ActiveRun, code: string, summary: string, failure?: ProofProcessFailure): Promise<RunIssueResult> {
@@ -2680,7 +2686,8 @@ export class RunIssue {
           'The committed candidate tree could not be inspected. Work and pending publication intent are preserved for retry.');
       }
     }
-    if (!hasCurrentConfiguredCheckReceipts(active.record, config.checks, publishedTreeSha)) {
+    if ((config.runner.checkExecution === 'host' && !hasPassingRunnerChecks(active.record, config))
+      || !hasCurrentConfiguredCheckReceipts(active.record, config.checks, publishedTreeSha)) {
       return this.invokedFailure(active, 'configured-check-policy-drift',
         'Retained validation does not confirm every current configured check on this candidate. Work, proof, and pending publication intent are preserved.');
     }
@@ -2815,7 +2822,7 @@ export class RunIssue {
     code: string,
     summary = 'Publication delivery requires reconciliation.',
     failure?: ProofProcessFailure,
-  ): Promise<RunIssueResult> {
+  ): Promise<Extract<RunIssueResult, { status: 'transport-failed' }>> {
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary, ...(failure ? { failure } : {}) });
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
@@ -3305,7 +3312,7 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
         ? 'The run was cancelled before completion.'
         : record.implementationResult?.summary ?? record.proofReceipt?.summary ?? 'The authorized implementation is ready for review.';
   const failedCheck = outcome.status === 'blocked' && record.runnerChecks?.status === 'complete'
-    ? record.runnerChecks.results.find(result => !runnerCheckAccepted(result, record.baseSha))
+    ? record.runnerChecks.results.find(result => !runnerCheckAccepted(result))
     : undefined;
   const checkId = failedCheck ? publicTerminalText(failedCheck.id, '', 100) : '';
   const jestDiagnostic = failedCheck?.jestDiagnostic;
@@ -3548,6 +3555,20 @@ function isTerminalBlockerDetail(value: unknown): value is {
     && Array.isArray(blocker.attempted) && blocker.attempted.every((item) => typeof item === 'string' && item.length > 0)
     && (blocker.reviewerRejectionDetail === undefined
       || (typeof blocker.reviewerRejectionDetail === 'string' && blocker.reviewerRejectionDetail.length > 0));
+}
+
+function hasPassingRunnerChecks(record: RunRecord, config: AgentAutoConfig): boolean {
+  const policy = config.checks;
+  const trusted = record.runnerChecks;
+  // A real pass can be reused for the same source and unchanged policy.
+  // A historical waiver still has a nonzero exit code and cannot be reused.
+  const previousPolicy = sha256(canonicalJson(Object.entries(policy)));
+  return trusted?.status === 'complete' && (trusted.policySha256 === runnerCheckPolicySha256(policy, config.runner.relatedResources)
+    || (!config.runner.relatedResources && trusted.policySha256 === previousPolicy))
+    && Object.entries(policy).every(([id, command]) => trusted.results.some(result =>
+      result.id === id && result.command === command && runnerCheckAccepted(result)
+      && record.implementationResult?.checks?.some(check => check.id === id && check.command === command
+        && check.status === 'passed' && check.outputSha256 === result.outputSha256)));
 }
 
 function hasCurrentConfiguredCheckReceipts(record: RunRecord, policy: Record<string, string>, publishedTreeSha?: string): boolean {

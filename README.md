@@ -294,43 +294,47 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-or carry the trusted Jest or Flutter baseline evidence described below after the final source edit before required device proof, Review, and publication.
+after the final source edit before required device proof, Review, and publication.
 
 In explicit host-check mode the implementation session returns `checks-request`
 after final edits. Runner runs configured commands in insertion order, stops on
-an unaccepted failure, and resumes the same session with complete local logs and trusted results.
+a failed check, and resumes the same session with complete local logs and trusted results. A single CLI run follows normal host-check handoffs within a bounded budget; interrupted work keeps the same resumable state.
 Proof and independent Review follow accepted host checks. Source changes, command
 changes or substituted output hashes invalidate the results. A crash during host
 execution leaves an unfinished action rather than rerunning commands automatically.
 The existing owned-command fence protects unresolved process groups.
 
-Host npm checks use conservative related Jest selection. For a supported full
-Jest check, Runner can admit identical assertion failures confirmed on the
-archived base. Every changed source file must have passing related suites, and
-every suite identified by the candidate or base dependency graph must pass on
-the candidate. Runner also traces reproducible failing suites on both trees to
-detect changed files loaded through computed imports and declines the exception
-when those suites use identifiable filesystem or subprocess dependencies.
-Runner installs the base lockfile offline with npm lifecycle scripts disabled. Missing coverage, incomplete reports, changed failures,
-snapshot failures, coverage collection and unsupported hooks keep the failed
-check blocking. A refusal retains the failed check, the reason and the next
-action, with private details in the local check logs.
-For ordinary full `flutter test` / `flutter test --no-pub` commands, Runner adds
-`--machine` to retain structured outcomes. When only Dart files under `lib/` and
-`test/` changed, a failed suite may be nonblocking only after Runner reproduces
-its identical test identities and error messages on an archived immutable base,
-with the same lockfile and installed SDK. The base and candidate import/export/part
-graphs identify passing affected-test coverage for every changed Dart file.
-Every edited test file must pass; failures in unchanged tests must match the
-immutable base exactly. Broad shared imports alone do not classify an unchanged
-baseline failure as a regression. Logs, real exit codes, base SHA, error hashes
-and affected test paths remain in trusted `runnerChecks` evidence. Completion
-receipts use the candidate log hash; the owner discloses baseline failures as
-residual risks. New failures or failures in edited tests, unknown scope, unsupported command
-flags, missing tests, incomplete output, failed baseline preparation, timeouts
-and cancellation remain blocking. Baseline commands use the same inherited host
-environment and owned process fence; they never edit the candidate or register
-a Git worktree. Other frameworks retain their full configured checks.
+Runner selects related tests for supported Jest and Flutter checks from the
+candidate diff, including untracked source. When it cannot establish the scope,
+it blocks the check without running the full suite. For other runners or
+project-specific test setup, use a check named `affected-test` (or
+`affected-test:<name>`). Its trusted command must select only affected tests
+relative to `CODEX_ORCHESTRATOR_BASE_SHA`, fail if it cannot establish scope,
+and require any fixtures needed to run the selected tests. For opaque non-test commands, declare a `check:<name>` key. Standard build,
+lint, typecheck and Flutter preparation or analysis checks retain their
+configured behavior. Keep test suites out of commands declared as non-test.
+Setup recognizes a project-provided `npm run test:affected` script.
+Before upgrading targets with opaque check aliases, unsupported frameworks or
+test-dependent assets outside the native dependency graph, configure their
+project selectors and declare their non-test checks explicitly.
+
+Set optional `runner.relatedResources` paths to include assets in the
+native selectors. `imageRoot` follows literal project-relative image paths
+and `publicRoot` follows literal public URLs or inline CSS URLs. Flutter
+`catalogRoot` compares flat string catalogs to the pinned base and follows
+only changed literal translation keys or a catalog test’s literal namespace.
+For Jest, `catalogRoot` permits imported JSON dictionaries under the declared
+folder and leaves selection to Jest’s import graph. The resulting paths
+enter the existing native dependency selection. Dynamic references without a
+literal match need an explicit project selector. Resource rules are part of
+the host receipt policy.
+
+A failed related test stays with the same implementation session. The Agent
+reads the log, diagnoses the cause, fixes the code or corrects the test, and
+requests fresh scoped checks. Only passing checks can authorize proof and
+Review. Existing failures still require repair if the affected suite exercises
+the candidate. An unresolved prerequisite or authority boundary remains a
+concrete blocker.
 
 Checks run in the implementation worktree, after the final source edit. The worker
 keeps full logs locally and reads failures itself; Runner never relays a truncated
@@ -342,12 +346,7 @@ missing verification, denied-path changes, ambiguous process ownership and
 publication divergence still prevent delivery. A report is worker evidence, not
 an independent execution attestation; Review must evaluate its adequacy.
 
-A failed mandatory check stays with the implementation owner for an in-scope
-repair or a concrete blocker. Before declaring an unexplained failure outside
-scope, the owner uses focused and baseline reproductions. It retains the first
-failed log and repeats the exact policy only when diagnostic evidence justifies
-a transient/environment recovery or an in-scope repair. Explicit host checks are finite Runner actions;
-source ownership, proof and Review remain in the same Codex session.
+Host checks are finite Runner actions. Source ownership, proof and Review remain in the same Codex session.
 
 Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
@@ -446,7 +445,7 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. Use setup `--flutter-sdk` to record the installed SDK commands. Runner executes these exact commands after a `checks-request`, then resumes the same Agent for proof and independent Review. All projects use host checks, including existing configurations without `runner.checkExecution`. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
+Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub`. Include dependency preparation in the configured commands when required. Runner selects related Dart test paths for ordinary Flutter test commands. Use setup `--flutter-sdk` to record the installed SDK commands. Runner executes configured non-test commands and scoped tests after a `checks-request`, then resumes the same Agent for proof and independent Review. All projects use host checks, including existing configurations without `runner.checkExecution`. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
 
 Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 
@@ -457,13 +456,10 @@ approving verdicts remain mandatory.
 
 ### Related Jest checks
 
-Runner invokes the package check executable on the host for each configured
-command. Recognized plain npm/Jest scripts use
-Jest's native `--findRelatedTests` over the complete diff from the run's base,
-including untracked source files and changed tests. Related failures and empty
-selections block completion. Configuration, deleted or unsupported files,
-executable Jest configuration, npm lifecycle hooks and local global Jest modules
-retain the full configured command. Build and typecheck stay complete.
+For recognized npm/Jest commands, Runner invokes Jest's native related-test
+selection over the complete diff from the run's base, including untracked
+source files and edited tests. Unsupported selection stops the check and
+explains how to supply a project selector. Build and typecheck stay complete.
 
 The helper runs in the Runner-owned host check process tree. Failures return to
 the same implementation owner for repair. Logs record the original policy and actual invocation; receipts
