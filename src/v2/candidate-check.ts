@@ -96,7 +96,8 @@ async function relatedJestArgs(): Promise<typeof selection> {
     || [...config.configs, config.globalConfig].some(localGlobalModule)) return;
   const explicitConfig = flags.flatMap((flag, i) => flag === '--config' ? [flags[i + 1]]
     : flag.startsWith('--config=') ? [flag.slice('--config='.length)] : []);
-  const setupPaths = config.configs.flatMap((project: { setupFilesAfterEnv?: string[] }) => project.setupFilesAfterEnv ?? []);
+  const setupPaths = config.configs.flatMap((project: { setupFiles?: string[]; setupFilesAfterEnv?: string[] }) =>
+    [...(project.setupFiles ?? []), ...(project.setupFilesAfterEnv ?? [])]);
   const changedPaths = new Set(files.map(file => resolve(cwd, file)));
   if ([...explicitConfig, ...setupPaths].some(path => path && changedPaths.has(resolve(cwd, path)))) return;
   // Refuse changed paths outside the resolved module roots. An aggregate
@@ -139,5 +140,5 @@ function localGlobalModule(config: Record<string, unknown>): boolean {
     return typeof value === 'string' && isAbsolute(value) && !value.includes('/node_modules/')
       && existsSync(value) && lstatSync(value).isFile();
   };
-  return Object.entries(config).some(([key, value]) => key !== 'moduleNameMapper' && key !== 'setupFilesAfterEnv' && local(value));
+  return Object.entries(config).some(([key, value]) => key !== 'moduleNameMapper' && key !== 'setupFiles' && key !== 'setupFilesAfterEnv' && local(value));
 }

@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover local Runner ownership after a host reboot.
+- Select related Jest and Flutter tests from the candidate diff, including configured images and translations, without falling back to the whole suite.
+- Resume the same implementation session to fix failed related tests, and preserve genuine passing check evidence for publication recovery.
+- Support unchanged Jest setup files in multi-project configurations while requiring explicit selection when the setup itself changes.
+
 ## [2.0.42] - 2026-11-07
 
 ### Fixed

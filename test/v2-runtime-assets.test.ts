@@ -151,9 +151,9 @@ test('implementation snapshot carries repair authority, exclusions, proof gates,
   ]) assert.equal(snapshot.referencedDocumentPaths.includes(path), true, path);
   const instructions = await readFile(join(snapshot.snapshotRoot, 'operations/implementation/SKILL.md'), 'utf8');
   assert.match(instructions, /Candidate file lists describe initial implementation focus/u);
-  assert.match(instructions, /related tests, mocks, and fixtures/u);
-  assert.match(instructions, /caused by the current change/u);
-  assert.match(instructions, /preserves the same assertions and authorized outcome/u);
+  assert.match(instructions, /affected code, tests, mocks, and fixtures: establish the cause/u);
+  assert.match(instructions, /failures already present on the base/u);
+  assert.match(instructions, /preserves valid assertions and the authorized outcome/u);
   assert.match(instructions, /Explicit file exclusions and hard allowlists remain binding/u);
   assert.match(instructions, /Do not skip tests, weaken assertions, or change unrelated behavior/u);
   assert.match(instructions, /changes the authorized outcome, report an authority boundary before editing/u);
@@ -389,7 +389,7 @@ test('contained owner maps settled infrastructure failures to resumable outcomes
   assert.match(implementationPrompt, /complete current candidate diff relative to the original HEAD/u);
   assert.match(implementationPrompt, /verification-only repair with no new edits still returns completed/u);
   assert.match(implementationPrompt, /Owner check executable: .*candidate-check\.js/u);
-  assert.match(implementationPrompt, /complete Git candidate/u);
+  assert.match(implementationPrompt, /selects native related Jest tests or stops when scope is uncertain/u);
   assert.match(implementationPrompt, /focused and baseline reproductions/u);
   assert.match(implementationPrompt, /Preserve the first failure/u);
   assert.match(implementationPrompt, /without that investigation/u);
