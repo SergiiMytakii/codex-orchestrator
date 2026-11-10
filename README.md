@@ -386,13 +386,14 @@ safety stop; a delivery error does not change the proven outcome.
 
 Short Runner commands share cancellation with the current tick. The repository
 owner lock records command launches before execution and clears them only after
-confirmed settlement. An unresolved process group, stream, or interrupted launch
-keeps ownership blocked; restarting the Runner cannot admit another command by
-assuming the previous process disappeared.
+confirmed settlement. Within the same boot, an unresolved process group, stream,
+or interrupted launch keeps ownership blocked across Runner restarts.
 
-An owner-lock refusal does not prove a stale lock. Foreign host/boot ownership
-stays blocked even if the recorded PID is absent; a live Darwin worker cannot
-prove matching start identity. Do not remove locks or reset state to force
+After a confirmed reboot on the same host, the Runner reclaims repository and
+journal locks from the previous boot and reconciles the durable run before
+continuing. A legacy macOS boot timestamp requires process-absence evidence
+before reclaim, including any recorded command cleanup. Foreign-host ownership
+and ambiguous records stay blocked. Do not remove locks or reset state to force
 progress. Legacy `codex-orchestrator.agent-auto-state` envelopes (versions 2/3)
 are accepted only when every record fully validates against the current execution
 contract. Reads preserve original bytes; the next normal state write uses the current

@@ -1053,6 +1053,7 @@ export function createV2Runtime(input: {
   targetRoot: string;
   orchestratorHome: string;
   bootId: string;
+  publisherBootId?: string;
   packageVersion: string;
   createWorkflowGeneration: () => Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
   issues?: GitHubIssueAdapter;
@@ -1129,7 +1130,7 @@ export function createV2Runtime(input: {
     orchestratorHome,
     parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
     safePath: runtimeSafePath,
-    bootId: input.bootId,
+    bootId: input.publisherBootId ?? input.bootId,
     process: containedProcess,
     createAttemptId: input.createAttemptId,
   });

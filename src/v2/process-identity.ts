@@ -3,6 +3,18 @@ import { readFile } from 'node:fs/promises';
 
 import type { ProcessStartIdentity } from './active-attempt.js';
 
+const DARWIN_BOOT_TIME = /^\{ sec = [0-9]+, usec = [0-9]{1,6} \}(?: .+)?$/u;
+const BOOT_UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
+
+/** Classify boot evidence after the caller has verified the host. */
+export function classifyRecordedBoot(recorded: string, current: string): 'same' | 'previous' | 'legacy' | 'unknown' {
+  if (recorded === current) return 'same';
+  if (!BOOT_UUID.test(current)) return 'unknown';
+  if (BOOT_UUID.test(recorded)) return recorded.toLowerCase() === current.toLowerCase() ? 'same' : 'previous';
+  // A legacy macOS timestamp can change within a boot. It cannot prove a reboot.
+  return DARWIN_BOOT_TIME.test(recorded) ? 'legacy' : 'unknown';
+}
+
 export type ProcessIdentityObservation = 'same' | 'reused' | 'absent' | 'unknown';
 export type ProcessGroupObservation = 'live' | 'absent' | 'unknown';
 export type ProcessStartIdentityCapture =

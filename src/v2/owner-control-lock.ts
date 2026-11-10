@@ -1,5 +1,5 @@
 import { defaultProcessExecutor, type UnresolvedCommandIdentity } from './adapters/command.js';
-import { observeProcessGroup } from './process-identity.js';
+import { classifyRecordedBoot, observeProcessGroup } from './process-identity.js';
 import { lstat, mkdir, readFile } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join } from 'node:path';
@@ -47,19 +47,34 @@ export async function inspectOwnerControlLock(input: {
   let owner: OwnerControlRecordV1;
   try { owner = await readOwner(controlGitDir, oid); }
   catch { return { status: 'ambiguous', reason: 'Owner control record is malformed.' }; }
-  if (owner.canonicalRepository !== input.canonicalRepository || owner.host !== input.host || owner.bootId !== input.bootId) {
-    return { status: 'ambiguous', reason: 'Owner control identity is foreign or stale.' };
+  return inspectRecordedOwner(owner, input);
+}
+
+async function inspectRecordedOwner(
+  owner: OwnerControlRecordV1,
+  input: Pick<OwnerControlLockInput, 'canonicalRepository' | 'host' | 'bootId' | 'inspectProcessIdentity'>,
+): Promise<{ status: 'active' | 'inactive' } | { status: 'ambiguous'; reason: string }> {
+  if (owner.canonicalRepository !== input.canonicalRepository || owner.host !== input.host) {
+    return { status: 'ambiguous', reason: 'owner control identity is foreign' };
   }
+  const boot = classifyRecordedBoot(owner.bootId, input.bootId);
+  if (boot === 'previous') return { status: 'inactive' };
+  if (boot === 'unknown') {
+    return { status: 'ambiguous', reason: 'owner control boot identity is ambiguous' };
+  }
+
+  const inspect = input.inspectProcessIdentity ?? inspectProcessIdentity;
   let observation: ProcessIdentityInspection;
-  try { observation = await (input.inspectProcessIdentity ?? inspectProcessIdentity)(owner.pid); }
-  catch { return { status: 'ambiguous', reason: 'Owner control process identity is unavailable.' }; }
-  if (observation.status === 'unknown') return { status: 'ambiguous', reason: 'Owner control process identity is unavailable.' };
-  if (owner.unresolvedCommand && !await commandFenceAbsent(owner.unresolvedCommand, input.inspectProcessIdentity ?? inspectProcessIdentity)) {
-    return { status: 'ambiguous', reason: 'Owned command group cleanup is unconfirmed.' };
+  try { observation = await inspect(owner.pid); }
+  catch { return { status: 'ambiguous', reason: 'owner control process identity is unavailable' }; }
+  const live = observation.status === 'present' && observation.processStartIdentity === owner.processStartIdentity;
+  if (observation.status === 'unknown' || (boot === 'legacy' && !live && observation.status !== 'absent')) {
+    return { status: 'ambiguous', reason: 'owner control process identity is unavailable' };
   }
-  return observation.status === 'present' && observation.processStartIdentity === owner.processStartIdentity
-    ? { status: 'active' }
-    : { status: 'inactive' };
+  if (owner.unresolvedCommand && !await commandFenceAbsent(owner.unresolvedCommand, inspect)) {
+    return { status: 'ambiguous', reason: 'owned command group cleanup is unconfirmed' };
+  }
+  return live ? { status: 'active' } : { status: 'inactive' };
 }
 
 export class OwnerControlLockBlockedError extends Error {
@@ -121,20 +136,10 @@ export async function acquireOwnerControlLock(input: OwnerControlLockInput): Pro
       continue;
     }
     const observed = await readOwner(controlGitDir, observedOid).catch(() => undefined);
-    if (!observed
-      || observed.canonicalRepository !== input.canonicalRepository
-      || observed.host !== input.host
-      || observed.bootId !== input.bootId) {
-      throw new OwnerControlLockBlockedError();
-    }
-    let observation: ProcessIdentityInspection;
-    try { observation = await (input.inspectProcessIdentity ?? inspectProcessIdentity)(observed.pid); }
-    catch { throw new OwnerControlLockBlockedError('owner process identity is unavailable'); }
-    if (observation.status === 'unknown') throw new OwnerControlLockBlockedError('owner process identity is unavailable');
-    if (observed.unresolvedCommand && !await commandFenceAbsent(observed.unresolvedCommand, input.inspectProcessIdentity ?? inspectProcessIdentity)) {
-      throw new OwnerControlLockBlockedError('owned command group cleanup is unconfirmed');
-    }
-    if (observation.status === 'present' && observation.processStartIdentity === observed.processStartIdentity) {
+    if (!observed) throw new OwnerControlLockBlockedError('owner control record is malformed');
+    const ownership = await inspectRecordedOwner(observed, input);
+    if (ownership.status === 'ambiguous') throw new OwnerControlLockBlockedError(ownership.reason);
+    if (ownership.status === 'active') {
       if (Date.now() - startedAt >= (input.waitMs ?? 5_000)) throw new OwnerControlLockBlockedError('owner control lock wait timed out', 'live-contention');
       await delay(input.pollMs ?? 25);
       continue;
@@ -277,8 +282,12 @@ function parseOwner(value: unknown): OwnerControlRecordV1 {
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error('owner control record keys are invalid');
   const owner = value as unknown as OwnerControlRecordV1;
   validateRepository(owner.canonicalRepository);
-  if (owner.version !== 1 || !owner.token || !owner.host || !owner.bootId
-    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !owner.processStartIdentity
+  if (owner.version !== 1
+    || typeof owner.token !== 'string' || !owner.token
+    || typeof owner.host !== 'string' || !owner.host
+    || typeof owner.bootId !== 'string' || !owner.bootId
+    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+    || typeof owner.processStartIdentity !== 'string' || !owner.processStartIdentity
     || Number.isNaN(Date.parse(owner.acquiredAt)) || new Date(owner.acquiredAt).toISOString() !== owner.acquiredAt) {
     throw new Error('owner control record fields are invalid');
   }

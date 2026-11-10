@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { canonicalJson } from './containment.js';
+import { classifyRecordedBoot } from './process-identity.js';
 
 const MAX_STATE_BYTES = 1024 * 1024;
 
@@ -250,9 +251,12 @@ async function acquireAdjacentLock(
     } catch (error) {
       if (!isErrorCode(error, 'EEXIST')) throw error;
       const owner = await readLockRecord(path);
-      if (owner.host !== options.host || owner.bootId !== options.bootId) throw new Error('state lock is owned by a foreign host or boot');
-      const identity = await options.inspectProcessIdentity(owner.pid);
+      if (owner.host !== options.host) throw new Error('state lock is owned by a foreign host');
+      const boot = classifyRecordedBoot(owner.bootId, options.bootId);
+      if (boot === 'unknown') throw new Error('state lock boot identity is ambiguous');
+      const identity = boot === 'previous' ? 'absent' : await options.inspectProcessIdentity(owner.pid);
       const live = typeof identity === 'object' && identity.processStartIdentity === owner.processStartIdentity;
+      if (boot === 'legacy' && !live && identity !== 'absent') throw new Error('state lock boot identity is ambiguous');
       if (!live) {
         if (identity === 'unknown' || !options.exclusiveRepositoryOwnership) throw new Error('state lock has a stale or ambiguous owner');
         const observed = await readLockRecord(path);

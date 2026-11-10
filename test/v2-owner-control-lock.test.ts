@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { acquireOwnerControlLock, OwnerControlLockBlockedError } from '../src/v2/owner-control-lock.js';
+import { acquireOwnerControlLock, inspectOwnerControlLock, OwnerControlLockBlockedError } from '../src/v2/owner-control-lock.js';
 
 test('host-global owner ref serializes distinct target clones and release is token-safe', async () => {
   const orchestratorHome = await mkdtemp(join(tmpdir(), 'owner-control-'));
@@ -101,15 +102,74 @@ test('dead-owner reclaim is PID-reuse resistant and live or unknown identity sta
   }), OwnerControlLockBlockedError);
 });
 
-test('foreign host or boot ownership stays fail closed even when the recorded PID is absent', async () => {
+test('foreign hosts and unknown boot changes stay blocked even when the recorded PID is absent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-foreign-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await acquireOwnerControlLock(input(root, 401, new Set([401])));
+  const next = input(root, 402, new Set([402]));
   for (const identity of [{ host: 'host-b' }, { bootId: 'boot-b' }]) {
-    const root = await mkdtemp(join(tmpdir(), 'owner-control-foreign-'));
-    await acquireOwnerControlLock(input(root, 401, new Set([401])));
-    await assert.rejects(acquireOwnerControlLock({
-      ...input(root, 402, new Set([402]), { waitMs: 5 }),
-      ...identity,
-      inspectProcessIdentity: async () => ({ status: 'absent' as const }),
-    }), OwnerControlLockBlockedError);
+    assert.equal((await inspectOwnerControlLock({ ...next, ...identity })).status, 'ambiguous');
+    await assert.rejects(acquireOwnerControlLock({ ...next, ...identity }), OwnerControlLockBlockedError);
+  }
+});
+
+test('a new boot on the same host supersedes even an interrupted command from the previous boot', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-reboot-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const old = await acquireOwnerControlLock({
+    ...input(root, 401, new Set([401])), bootId: '11111111-1111-4111-8111-111111111111',
+  });
+  await old.beginCommand();
+  const next = {
+    ...input(root, 402, new Set([401, 402])), bootId: '22222222-2222-4222-8222-222222222222',
+  };
+  assert.deepEqual(await inspectOwnerControlLock(next), { status: 'inactive' });
+  const owner = await acquireOwnerControlLock(next);
+  assert.deepEqual(await inspectOwnerControlLock(next), { status: 'active' });
+  await owner.release();
+});
+
+test('a legacy boot record can be reclaimed after the recorded process is confirmed absent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-legacy-boot-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await acquireOwnerControlLock({
+    ...input(root, 401, new Set([401])), bootId: '{ sec = 1793946093, usec = 572479 } Fri Nov 6 08:21:33 2026',
+  });
+  const next = { ...input(root, 402, new Set([402])), bootId: '22222222-2222-4222-8222-222222222222' };
+  const live = {
+    ...input(root, 402, new Set([401, 402]), { waitMs: 5 }), bootId: next.bootId,
+  };
+  assert.deepEqual(await inspectOwnerControlLock(live), { status: 'active' });
+  await assert.rejects(acquireOwnerControlLock(live), { kind: 'live-contention' });
+  await assert.rejects(acquireOwnerControlLock({
+    ...next,
+    inspectProcessIdentity: async () => ({ status: 'unknown' }),
+  }), OwnerControlLockBlockedError);
+  await assert.rejects(acquireOwnerControlLock({
+    ...next,
+    inspectProcessIdentity: async () => ({ status: 'present', processStartIdentity: 'unmatched-start' }),
+  }), OwnerControlLockBlockedError);
+  const owner = await acquireOwnerControlLock(next);
+  await owner.release();
+});
+
+test('malformed boot IDs cannot authorize replacement of an owner record', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-malformed-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const owner = input(root, 401, new Set([401]));
+  await acquireOwnerControlLock(owner);
+  const store = join(root, 'v2', 'owner-control.git');
+  const ref = 'refs/codex-orchestrator/owners/' + createHash('sha256').update(owner.canonicalRepository).digest('hex');
+  const git = (args: string[], stdin?: string) =>
+    execFileSync('git', ['--git-dir', store, ...args], { input: stdin, encoding: 'utf8' }).trim();
+  const record = JSON.parse(git(['cat-file', 'blob', ref]));
+  const next = { ...input(root, 402, new Set([402])), bootId: '22222222-2222-4222-8222-222222222222' };
+  for (const bootId of [123, ['11111111-1111-4111-8111-111111111111']]) {
+    const oid = git(['hash-object', '-w', '--stdin'], JSON.stringify({ ...record, bootId }));
+    git(['update-ref', ref, oid]);
+    assert.equal((await inspectOwnerControlLock(next)).status, 'ambiguous');
+    await assert.rejects(acquireOwnerControlLock(next), /owner control record is malformed/u);
+    assert.equal(git(['rev-parse', ref]), oid);
   }
 });
 

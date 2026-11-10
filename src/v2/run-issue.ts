@@ -1,6 +1,7 @@
 import { jestDiagnosticText } from './jest-host-checks.js';
 import { runnerCheckAccepted, runnerCheckPolicySha256, type RunnerCheckResult } from './runner-checks.js';
 import { dirname, resolve } from 'node:path';
+import { classifyRecordedBoot } from './process-identity.js';
 
 import {
   checkedChangePayloadSha256,
@@ -2299,8 +2300,12 @@ export class RunIssue {
       return { active: await this.clearAttempt(active) };
     }
     let observation;
-    try { observation = await this.dependencies.processIdentity.observe(attempt.process); }
-    catch {
+    try {
+      const current = this.dependencies.processIdentity;
+      observation = attempt.process.host === current.host && classifyRecordedBoot(attempt.process.bootId, current.bootId) === 'previous'
+        ? { leader: 'absent' as const, group: 'absent' as const }
+        : await current.observe(attempt.process);
+    } catch {
       return this.invokedFailure(
         active,
         'active-attempt-observation-inaccessible',

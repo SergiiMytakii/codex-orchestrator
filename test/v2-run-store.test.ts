@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -358,6 +358,56 @@ test('file lock blocks stale, foreign, malformed, and live owners without reclai
     await assert.rejects(writer.compareAndSwap(0, body([record()])), /lock/u, `case ${index}`);
     assert.equal(JSON.parse(await readFile(`${path}.lock`, 'utf8')).token, lock.token);
   }
+});
+
+test('a repository owner can recover a journal lock from a previous boot', async (t) => {
+  const root = await temporaryRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'run-state.json');
+  const lock = {
+    version: 2, token: 'old', host: 'host-a', pid: 123, acquiredAt: timestamp(),
+    bootId: '11111111-1111-4111-8111-111111111111', processStartIdentity: 'start-123',
+  };
+  await writeFile(`${path}.lock`, JSON.stringify(lock));
+  const options = {
+    ...deterministicAtomicOptions(), bootId: '22222222-2222-4222-8222-222222222222',
+    inspectProcessIdentity: async () => ({ processStartIdentity: 'start-123' }),
+  };
+  await assert.rejects(new FileRunRecordWriter(path, options).compareAndSwap(0, body([record()])), /lock/u);
+  const foreign = new FileRunRecordWriter(path, { ...options, host: 'host-b', exclusiveRepositoryOwnership: true });
+  await assert.rejects(foreign.compareAndSwap(0, body([record()])), /lock/u);
+  assert.deepEqual(JSON.parse(await readFile(`${path}.lock`, 'utf8')), lock);
+
+  const owner = new FileRunRecordWriter(path, { ...options, exclusiveRepositoryOwnership: true });
+  await owner.compareAndSwap(0, body([record()]));
+  assert.deepEqual((await owner.read()).runs, [record()]);
+});
+
+test('a legacy journal lock waits for the matching owner and only reclaims on process absence', async (t) => {
+  const root = await temporaryRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'run-state.json');
+  await writeFile(`${path}.lock`, JSON.stringify({
+    version: 2, token: 'old', host: 'host-a', pid: 123, acquiredAt: timestamp(),
+    bootId: '{ sec = 1793946093, usec = 572479 } Fri Nov 6 08:21:33 2026',
+    processStartIdentity: 'start-123',
+  }));
+  const options = {
+    ...deterministicAtomicOptions({ lockWaitMs: 5 }),
+    bootId: '22222222-2222-4222-8222-222222222222',
+    exclusiveRepositoryOwnership: true,
+  };
+  for (const [identity, expected] of [
+    [{ processStartIdentity: 'start-123' }, /wait timed out/u],
+    [{ processStartIdentity: 'different-start' }, /boot identity is ambiguous/u],
+    ['unknown', /boot identity is ambiguous/u],
+  ] as const) {
+    const writer = new FileRunRecordWriter(path, { ...options, inspectProcessIdentity: async () => identity });
+    await assert.rejects(writer.compareAndSwap(0, body([record()])), expected);
+  }
+  const owner = new FileRunRecordWriter(path, { ...options, inspectProcessIdentity: async () => 'absent' });
+  await owner.compareAndSwap(0, body([record()]));
+  assert.deepEqual((await owner.read()).runs, [record()]);
 });
 
 test('lock release is token-safe', async () => {

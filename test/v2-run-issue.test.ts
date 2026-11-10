@@ -2642,6 +2642,24 @@ test('safe-halt returns after one tick, preserves attempt identity, and retries 
   assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
 });
 
+test('a reboot resumes the existing run even if the old process group ID has been reused', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'safe-halt' } });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  fixture.dependencies.processIdentity.bootId = '11111111-1111-4111-8111-111111111111';
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const frozen = (await fixture.store.read()).runs[0]!;
+  assert.equal(frozen.activeAttempt?.stage, 'launched');
+
+  await rm(frozen.activeAttempt!.resultPath, { force: true });
+  fixture.options.implementationResult = undefined;
+  fixture.dependencies.processIdentity.bootId = '22222222-2222-4222-8222-222222222222';
+  fixture.dependencies.processIdentity.observe = async () => ({ leader: 'reused', group: 'live' });
+  assert.equal((await fixture.newRunner().runIssue(input)).status, 'review-ready');
+  const resumed = (await fixture.store.read()).runs[0]!;
+  assert.equal(resumed.runId, frozen.runId);
+  assert.equal(resumed.cycle, frozen.cycle);
+});
+
 test('safe-halt notifications retry failed delivery on restart without relaunching a live attempt', async () => {
   for (const failedEffect of ['comment', 'labels'] as const) {
     const fixture = await runFixture({ fileBackedStore: true, rejectEffect: failedEffect,

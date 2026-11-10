@@ -280,16 +280,24 @@ async function executeProductionRun(intent: RunIntent, snapshot?: { bytes: Buffe
   const config = snapshot?.config ?? await readTargetConfig(intent.targetRoot);
   if (snapshot && !(await readConfigBytes(intent.targetRoot)).equals(snapshot.bytes)) throw new Error('config-snapshot-changed');
   const orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator'));
-  const bootId = await readBootId();
+  const [bootId, darwinPublisherBootId] = await Promise.all([
+    readBootId(),
+    process.platform === 'darwin' ? readDarwinBootValue('kern.boottime') : undefined,
+  ]);
+  // Immutable workflow claims are shared with already-running older binaries.
+  const publisherBootId = darwinPublisherBootId ?? bootId;
   const runtime = createV2Runtime({
     targetRoot: intent.targetRoot,
     abortController,
     ...(snapshot ? { expectedConfigBytes: snapshot.bytes } : {}),
     orchestratorHome,
     bootId,
+    publisherBootId,
     packageVersion,
     createWorkflowGeneration: async () => {
-      const receipt = await materializeWorkflowGeneration({ packageRoot, runtimeRoot: orchestratorHome, packageVersion, bootId });
+      const receipt = await materializeWorkflowGeneration({
+        packageRoot, runtimeRoot: orchestratorHome, packageVersion, bootId: publisherBootId,
+      });
       return { receipt, skillHashes: await workflowSkillHashes(receipt) };
     },
     createGitHubAdapters: (signal, executor) => {
@@ -346,12 +354,17 @@ function cliHelp(): string {
 
 async function readBootId(): Promise<string> {
   if (process.platform === 'linux') return (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
-  if (process.platform === 'darwin') {
-    const result = await defaultProcessExecutor('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeoutMs: 5_000, processGroup: true, maxOutputBytes: 16_384 });
-    if (result.exitCode !== 0 || !result.stdout.trim()) throw new Error('boot identity is unavailable');
-    return result.stdout.trim();
-  }
+  if (process.platform === 'darwin') return (await readDarwinBootValue('kern.bootsessionuuid')).toLowerCase();
   throw new Error(`platform ${process.platform} cannot prove boot identity`);
+}
+
+async function readDarwinBootValue(name: 'kern.bootsessionuuid' | 'kern.boottime'): Promise<string> {
+  const result = await defaultProcessExecutor('/usr/sbin/sysctl', ['-n', name], {
+    timeoutMs: 5_000, processGroup: true, maxOutputBytes: 16_384,
+  });
+  const value = result.stdout.trim();
+  if (result.exitCode !== 0 || !value) throw new Error('boot identity is unavailable');
+  return value;
 }
 
 export function isDirectCliExecution(entryPath: string, modulePath: string): boolean {
