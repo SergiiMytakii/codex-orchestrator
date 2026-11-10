@@ -1,6 +1,6 @@
 /** Owner-invoked Jest check. A missing selection never runs the full suite. */
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { constants, tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { expandRelatedResources, isDocumentationPath, type RelatedResources } from './affected-test-paths.js';
@@ -93,13 +93,19 @@ async function relatedJestArgs(): Promise<typeof selection> {
     || ['lastCommit', 'onlyChanged', 'changedSince', 'changedFilesWithAncestor', 'onlyFailures', 'watch', 'watchAll', 'listTests', 'runTestsByPath', 'filter', 'shard']
       .some(key => config.globalConfig[key])
     || (config.globalConfig.testFailureExitCode !== undefined && config.globalConfig.testFailureExitCode <= 0)
-    || [...config.configs, config.globalConfig].some(localGlobalModule)) return;
+    || config.configs.some(localGlobalModule)) return;
+  const { projects = [], ...globalOptions } = config.globalConfig;
+  if (!Array.isArray(projects) || projects.some((project: unknown) => typeof project !== 'string') || localGlobalModule(globalOptions)) return;
   const explicitConfig = flags.flatMap((flag, i) => flag === '--config' ? [flags[i + 1]]
     : flag.startsWith('--config=') ? [flag.slice('--config='.length)] : []);
   const setupPaths = config.configs.flatMap((project: { setupFiles?: string[]; setupFilesAfterEnv?: string[] }) =>
     [...(project.setupFiles ?? []), ...(project.setupFilesAfterEnv ?? [])]);
   const changedPaths = new Set(files.map(file => resolve(cwd, file)));
-  if ([...explicitConfig, ...setupPaths].some(path => path && changedPaths.has(resolve(cwd, path)))) return;
+  if ([...explicitConfig, ...projects, ...setupPaths].some(path => {
+    if (!path) return false;
+    const absolute = resolve(cwd, path);
+    return changedPaths.has(absolute) || (existsSync(absolute) && changedPaths.has(realpathSync(absolute)));
+  })) return;
   // Refuse changed paths outside the resolved module roots. An aggregate
   // related query can otherwise quietly omit them when other files match.
   const roots = config.configs.flatMap((project: { roots?: string[] }) => project.roots ?? [cwd]);

@@ -136,15 +136,20 @@ echo unrelated-failure; exit 1
     await exec('git', ['add', 'package.json'], { cwd: root });
     await exec('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'plain npm baseline'], { cwd: root });
     await writeFile(join(root, 'src/setup-env.cjs'), 'module.exports = {};');
-    await exec('git', ['add', 'src/setup-env.cjs'], { cwd: root });
+    await writeFile(join(root, 'jest.project.config.cjs'), 'module.exports = {};');
+    await exec('git', ['add', 'src/setup-env.cjs', 'jest.project.config.cjs'], { cwd: root });
     await exec('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'setup baseline'], { cwd: root });
     await writeFile(join(root, 'resolved-config.json'), JSON.stringify({
-      configs: [{ setupFiles: [join(root, 'src/setup-env.cjs')] }], globalConfig: {},
+      configs: [{ setupFiles: [join(root, 'src/setup-env.cjs')] }],
+      globalConfig: { projects: [join(root, 'jest.project.config.cjs')] },
     }));
     assert.equal((await run()).code, 0, 'an unchanged setup file permits related tests');
     await writeFile(join(root, 'src/setup-env.cjs'), 'module.exports = { changed: true };');
     assert.notEqual((await run()).code, 0, 'a changed global setup requires an explicit selector');
     await writeFile(join(root, 'src/setup-env.cjs'), 'module.exports = {};');
+    await writeFile(join(root, 'jest.project.config.cjs'), 'module.exports = { changed: true };');
+    assert.notEqual((await run()).code, 0, 'a changed project config requires an explicit selector');
+    await writeFile(join(root, 'jest.project.config.cjs'), 'module.exports = {};');
     for (const flag of ['lastCommit', 'onlyChanged', 'changedSince', 'changedFilesWithAncestor', 'onlyFailures', 'watch', 'watchAll', 'listTests', 'testFailureExitCode']) {
       await writeFile(join(root, 'resolved-config.json'), JSON.stringify({ configs: [{}], globalConfig: { [flag]: flag === 'testFailureExitCode' ? 0 : true } }));
       const result = await run();
