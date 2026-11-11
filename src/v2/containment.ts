@@ -150,6 +150,40 @@ export function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+export function containsAddedCredentialEvidence(patch: string): boolean {
+  let inHunk = false;
+  let isDart = false;
+  const addedLines: string[] = [];
+  const lines = patch.split('\n');
+  for (const [index, rawLine] of lines.entries()) {
+    const line = rawLine.replace(/\r$/u, '');
+    if (inHunk && !line.startsWith('+') && addedLines.length > 0) {
+      if (containsCredentialEvidence(addedLines.join('\n'))) return true;
+      addedLines.length = 0;
+    }
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      isDart = false;
+    } else if (!inHunk && line.startsWith('+++ ')) {
+      isDart = /\.dart"?\t?$/u.test(line);
+    } else if (line.startsWith('@@ ')) {
+      inHunk = true;
+    }
+    if (!inHunk || !line.startsWith('+')) continue;
+
+    const added = line.slice(1);
+    // Dart's quoted Bearer/Basic map values may consist entirely of an
+    // interpolation. Keep the expression visible to all other patterns.
+    const mapClosesOnNextLine = /^[ +][ \t]*\}/u.test(lines[index + 1] ?? '');
+    addedLines.push(isDart ? added.replace(
+      /(["'])authorization\1[ \t]*:[ \t]*(["'])(?:bearer|basic)[ \t]+(\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\})\2[ \t]*([,}]|$)/giu,
+      (match, _keyQuote: string, valueQuote: string, reference: string, delimiter: string) =>
+        delimiter || mapClosesOnNextLine ? valueQuote + reference + valueQuote + delimiter : match,
+    ) : added);
+  }
+  return containsCredentialEvidence(addedLines.join('\n'));
+}
+
 export function containsCredentialEvidence(value: string): boolean {
   const assignments = value.matchAll(/["']?(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*(["']?)([^\s"']{8,})/giu);
   for (const match of assignments) {

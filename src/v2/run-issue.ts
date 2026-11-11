@@ -12,7 +12,7 @@ import {
   type CheckedChangePayloadV2,
 } from './checked-change.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
-import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
+import { canonicalJson, containsAddedCredentialEvidence, containsCredentialEvidence, containsHostIdentityEvidence, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
 import { findDeniedPathMatch } from './adapters/path-policy.js';
 import {
   adoptActiveAttempt,
@@ -1660,7 +1660,7 @@ export class RunIssue {
       active = captured.active;
       const binding = active.record.candidateBinding!;
       const target = await this.dependencies.git.diffTrees(worktreePath, active.record.baseSha, binding.candidateTreeSha);
-      if (containsCredentialEvidence(target.patch)) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-credential-evidence');
+      if (containsAddedCredentialEvidence(target.patch)) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-credential-evidence');
       if (!target.patch.trim() || target.changedFiles.some(path => findDeniedPathMatch(path, config.deny.readPaths)))
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-path-policy');
       const checkPolicySha256 = sha256(canonicalJson(config.checks));

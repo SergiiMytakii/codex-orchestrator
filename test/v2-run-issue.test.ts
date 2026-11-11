@@ -12,7 +12,7 @@ import { promisify } from 'node:util';
 import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1, CheckedChangePayloadV2 } from '../src/v2/checked-change.js';
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
-import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from '../src/v2/containment.js';
+import { canonicalJson, containsAddedCredentialEvidence, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from '../src/v2/containment.js';
 import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
@@ -2062,6 +2062,65 @@ test('host identity detection covers generic and Markdown-delimited paths withou
     'I/flutter: Android proof ready',
     'https://example.invalid/issues/42',
   ]) assert.equal(containsHostIdentityEvidence(value), false, value);
+});
+
+test('candidate credential scan permits removed headers and added variable references', async () => {
+  const patch = [
+    'diff --git a/code.dart b/code.dart',
+    '--- a/code.dart',
+    '+++ b/code.dart',
+    '@@ -1 +1 @@',
+    "-headers = {'Authorization': 'Bearer removed-synthetic-credential-12345'};",
+    "+headers = {'Authorization': 'Bearer ${credentials.accessToken}'};",
+    '',
+  ].join('\n');
+  const fixture = await runFixture({ diffTreeOverride: { changedFiles: ['code.dart'], patch } });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready');
+});
+
+test('candidate credential scan blocks an added hardcoded authorization value', async () => {
+  const patch = [
+    'diff --git a/code.dart b/code.dart',
+    '--- a/code.dart',
+    '+++ b/code.dart',
+    '@@ -1 +1 @@',
+    '-headers = {};',
+    "+headers = {'Authorization': 'Bearer synthetic-credential-12345'};",
+    '',
+  ].join('\n');
+  const fixture = await runFixture({ diffTreeOverride: { changedFiles: ['code.dart'], patch } });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  assert.match(await readFile(resolve(fixture.targetRoot, result.evidencePath), 'utf8'), /candidate-credential-evidence/u);
+});
+
+test('candidate credential scan applies reference syntax only in the corresponding source language', () => {
+  function addedPatch(file: string, line: string) {
+    return ['diff --git a/' + file + ' b/' + file, '--- /dev/null', '+++ b/' + file, '@@ -0,0 +1 @@', '+' + line].join('\n');
+  }
+
+  for (const [file, line] of [
+    ['settings.yml', 'settings: {host: localhost, password: syntheticpassword, port: 1234}'],
+    ['settings.json', '{"Authorization": "Bearer ${synthetictoken}"}'],
+    ['headers.ts', 'const headers = {Authorization: "Bearer ${synthetictoken}"};'],
+    ['config.dart', "const config = {password: 'syntheticpassword'};"],
+  ]) assert.equal(containsAddedCredentialEvidence(addedPatch(file, line)), true, line);
+
+  assert.equal(containsAddedCredentialEvidence([
+    addedPatch('settings.yml', 'password:'),
+    addedPatch('code.ts', 'applicationLogger.info("Started");'),
+  ].join('\n')), false);
+
+  const dartReference = "    'Authorization': 'Bearer $token'";
+  const dartMapPatch = addedPatch('code.dart', dartReference) + '\n };';
+  assert.equal(containsAddedCredentialEvidence(dartMapPatch), false);
+  assert.equal(containsAddedCredentialEvidence(
+    addedPatch('code.dart', dartReference) + '\n+    \'synthetic-credential-suffix\'\n };',
+  ), true);
+  assert.equal(containsAddedCredentialEvidence(
+    dartMapPatch.replaceAll('code.dart', 'code with spaces.dart').replace('+++ b/code with spaces.dart', '+++ b/code with spaces.dart\t').replaceAll('\n', '\r\n'),
+  ), false);
 });
 
 test('dummy token exception is exact and does not suppress other credential evidence', () => {

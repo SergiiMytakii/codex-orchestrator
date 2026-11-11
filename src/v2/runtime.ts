@@ -555,7 +555,8 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   async diffTrees(worktreePath: string, previousTreeSha: string, candidateTreeSha: string): Promise<{ changedFiles: string[]; patch: string }> {
     const [names, patch] = await Promise.all([
       this.git(['-C', worktreePath, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', previousTreeSha, candidateTreeSha], { maxOutputBytes: 1024 * 1024 }),
-      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--']),
+      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-color', '--no-textconv', '--unified=3',
+        '--output-indicator-new=+', '--output-indicator-old=-', '--output-indicator-context= ', previousTreeSha, candidateTreeSha, '--']),
     ]);
     return { changedFiles: names.split('\0').filter(Boolean).sort(), patch };
   }
