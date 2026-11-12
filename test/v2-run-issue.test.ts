@@ -2064,12 +2064,13 @@ test('host identity detection covers generic and Markdown-delimited paths withou
   ]) assert.equal(containsHostIdentityEvidence(value), false, value);
 });
 
-test('candidate credential scan permits removed headers and added variable references', async () => {
+test('candidate credential scan permits unchanged fixtures, removed headers and added variable references', async () => {
   const patch = [
     'diff --git a/code.dart b/code.dart',
     '--- a/code.dart',
     '+++ b/code.dart',
-    '@@ -1 +1 @@',
+    '@@ -1,2 +1,2 @@',
+    " const rejectedUrl = 'https://user:pass@fixture.invalid';",
     "-headers = {'Authorization': 'Bearer removed-synthetic-credential-12345'};",
     "+headers = {'Authorization': 'Bearer ${credentials.accessToken}'};",
     '',
@@ -3298,7 +3299,7 @@ for (const scenario of [
   { name: 'large source patch', patch: '+' + 'x'.repeat(1024 * 1024), paths: ['feature.txt'], status: 'review-ready' },
 ]) {
   test(`candidate admission enforces ${scenario.name}`, async () => {
-    const fixture = await runFixture({ denyReadPaths: ['secrets/**'], diffTreeOverride: { changedFiles: scenario.paths, patch: `diff --git a/feature.txt b/feature.txt\n${scenario.patch}\n` } });
+    const fixture = await runFixture({ denyReadPaths: ['secrets/**'], diffTreeOverride: { changedFiles: scenario.paths, patch: `diff --git a/${scenario.paths[0]} b/${scenario.paths[0]}\n--- a/${scenario.paths[0]}\n+++ b/${scenario.paths[0]}\n@@ -0,0 +1 @@\n${scenario.patch}\n` } });
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.equal(result.status, scenario.status, JSON.stringify(fixture.evidence));
     if (result.status === 'blocked') {
