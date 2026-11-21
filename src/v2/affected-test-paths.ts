@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 /** Built-in selectors treat conventional Markdown docs as prose. Projects with tested docs supply their own selector. */
 export function isDocumentationPath(file: string): boolean {
-  return /^(?:docs\/.+\.md|(?:README|CHANGELOG|CONTRIBUTING)\.md)$/iu.test(file);
+  return /^(?:docs\/.+\.md|(?:AGENTS|README|CHANGELOG|CODING_STANDARDS|CONTRIBUTING)\.md)$/iu.test(file);
 }
 
 export interface RelatedResources {
