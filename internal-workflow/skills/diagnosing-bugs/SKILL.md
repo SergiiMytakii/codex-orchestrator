@@ -18,7 +18,7 @@ fixes, post-fix verification, production source/runtime mutations, Git actions
 patches. Return to the invoking owner after diagnosis; Implement owns any
 separately authorized fix. Diagnosis alone does not authorize implementation.
 
-Read `CONTEXT.md` when present and relevant ADRs when exploring the codebase.
+Read `GLOSSARY.md` when present and relevant ADRs when exploring the codebase.
 Use the [confidence rubric](../../docs/agents/confidence-rubric.md) for conclusions;
 uncertain explanations remain hypotheses or evidence gaps, not proven causes.
 

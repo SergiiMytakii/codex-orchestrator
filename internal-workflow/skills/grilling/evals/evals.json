@@ -39,7 +39,7 @@
         "leave domain-document mutation to a separately active domain-modeling discipline"
       ],
       "forbidden": [
-        "edit CONTEXT.md",
+        "edit GLOSSARY.md",
         "create an ADR"
       ]
     }

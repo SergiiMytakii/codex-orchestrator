@@ -42,7 +42,7 @@ Prompt each independent context with a separate technical brief (file paths, cou
 - Alternative 3: "Optimise for the most common caller — make the default case trivial."
 - Alternative 4 (if applicable): "Design around ports & adapters for cross-seam dependencies."
 
-Include both [SKILL.md](./SKILL.md) vocabulary and `CONTEXT.md` vocabulary in the brief so each context names things consistently with the architecture language and the project's domain language.
+Include both [SKILL.md](./SKILL.md) vocabulary and `GLOSSARY.md` vocabulary in the brief so each context names things consistently with the architecture language and the project's domain language.
 
 Each context outputs:
 

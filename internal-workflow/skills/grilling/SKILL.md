@@ -46,6 +46,6 @@ skill does not implement it.
 ## Mutation boundary
 
 Grilling is write-free. It may read repository domain language to phrase
-questions consistently, but it never creates or edits `CONTEXT.md`,
-`CONTEXT-MAP.md`, or ADRs. Domain-document mutation belongs only to
+questions consistently, but it never creates or edits `GLOSSARY.md`,
+`GLOSSARY-MAP.md`, or ADRs. Domain-document mutation belongs only to
 `$domain-modeling`, when that discipline is separately active.

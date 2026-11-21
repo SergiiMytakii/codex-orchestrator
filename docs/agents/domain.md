@@ -7,7 +7,7 @@ authorized GitHub Issue by a trusted Runner and contained Codex workers.
 
 Read only the authority needed for the task:
 
-- `CONTEXT.md` owns the glossary and durable domain relationships.
+- `GLOSSARY.md` owns the glossary and durable domain relationships.
 - Relevant ADRs in `docs/adr/` own accepted architectural decisions.
 - Current code, configuration, and tests own implemented Runner behavior.
 - `docs/agents/execution-routing.md` for repo-specific execution and quality
@@ -18,7 +18,7 @@ as context unless the user explicitly asks to edit or audit that file.
 
 ## Vocabulary
 
-Use the exact glossary terms from `CONTEXT.md`, especially Runner, Agent, Run,
+Use the exact glossary terms from `GLOSSARY.md`, especially Runner, Agent, Run,
 Checked Change, Acceptance Proof, Runner-owned action, Safe halt, and
 Review-ready.
 

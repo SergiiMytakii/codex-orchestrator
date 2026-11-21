@@ -3,7 +3,7 @@
 ## Sources of truth
 
 - `README.md`: public commands and lifecycle.
-- `CONTEXT.md` and relevant ADRs: durable terminology and accepted decisions.
+- `GLOSSARY.md` and relevant ADRs: durable terminology and accepted decisions.
 - `.codex-orchestrator/config.json`: this repository's exact live V2 policy.
 - `src/v2/`: reusable policy core.
 - `src/v2/adapters/`: package-owned transport and persistence closure.

@@ -9,9 +9,9 @@ policy own TDD, review order, commit behavior, and response style.
 - Coding, validation, live-smoke, and release routing:
   `docs/agents/execution-routing.md`.
 - Runner architecture and policy: current `src/v2/` code, configuration, tests,
-  `CONTEXT.md`, and relevant ADRs under `docs/adr/`.
+  `GLOSSARY.md`, and relevant ADRs under `docs/adr/`.
 - Issues, triage, and domain language: `docs/agents/issue-tracker.md`,
-  `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and `CONTEXT.md`.
+  `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and `GLOSSARY.md`.
 - Live-smoke scenarios and release history: `docs/live-smoke-checklist.md` and
   `CHANGELOG.md`.
 

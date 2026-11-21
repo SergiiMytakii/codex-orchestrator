@@ -30,7 +30,7 @@ completion_proof: "1134-issue-1243-proof.md"
   spec, waiting-question, proof, publication, and post-PR behavior.
 - **Source Material:** GitHub #1243 as implementation authority; #1242 only for
   parent invariants and explicit exclusions; [B0 baseline](1132-issue-1243-b0.md);
-  `CONTEXT.md`; ADR 0001 and ADR 0002; current `src/v2/`, adapters, and tests.
+  `GLOSSARY.md`; ADR 0001 and ADR 0002; current `src/v2/`, adapters, and tests.
 - **Approved Scope:** Clean-cut the durable state schema; centralize process
   identity/result adoption/absence/cleanup; make operation-specific records
   semantic Run data only; move proof recovery into Run state; replace all

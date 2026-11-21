@@ -10,7 +10,7 @@
         "exclude timeout and retry helper as general programming concepts"
       ],
       "forbidden": [
-        "use CONTEXT.md as an implementation notes file",
+        "use GLOSSARY.md as an implementation notes file",
         "record general programming vocabulary as domain language"
       ]
     },
@@ -30,7 +30,7 @@
       "id": "sole-domain-write-owner",
       "prompt": "A composed interview resolved one project-specific term and one qualifying architectural decision; domain-document writes are authorized.",
       "expected": [
-        "make domain-modeling the only discipline that updates CONTEXT.md and the ADR",
+        "make domain-modeling the only discipline that updates GLOSSARY.md and the ADR",
         "preserve the invoking driver's workflow and Git ownership",
         "stop on overlapping unrelated changes"
       ],

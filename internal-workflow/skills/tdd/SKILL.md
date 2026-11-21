@@ -7,7 +7,7 @@ description: Use test-driven development where possible for observable behavior 
 
 TDD is an internal proof discipline invoked by Implement, which retains
 ownership of implementation, production mutations, Review, and Git.
-Read `CONTEXT.md` when present and relevant ADRs so test vocabulary and expected
+Read `GLOSSARY.md` when present and relevant ADRs so test vocabulary and expected
 behavior match the project's domain and authorized contract.
 
 ## Test Boundary and Expectations
