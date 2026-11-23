@@ -63,8 +63,11 @@ extend it only when required by the authorized outcome.
    approvals remain valid. Repeat complete Review only when repair impact cannot
    be isolated.
 3. **Assign:** give each selected reviewer the same applicable inputs and
-   boundaries above, with its lens duties. Keep each brief under 400 words and
-   begin it with `Assigned role: <role>`.
+   boundaries above, with its lens duties. When Standards is selected, search
+   the target repository for guidance applicable to the changed paths. Read
+   and pass the exact paths of applicable `CODING_STANDARDS.md`,
+   `CONTRIBUTING.md`, and other repository standards in the Standards brief.
+   Keep each brief under 400 words and begin it with `Assigned role: <role>`.
 4. **Wait:** use fresh children without history fork (`fork_context=false` on V1;
    `fork_turns="none"` on V2). Capture every non-empty child identity and wait
    for those same children. An empty bounded wait means wait again, not failure.

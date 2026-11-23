@@ -51,7 +51,7 @@ and silently breaks a running chat's connection.
 
 Local Flutter UI work always uses a platform QA skill plus the runtime ownership gate:
 
-- Android emulator: always use `$flutter-android-debug` as the lifecycle orchestrator
+- Android device or emulator: always use `$flutter-android-debug` as the lifecycle orchestrator
   and `test-android-apps:android-emulator-qa` for navigation, interaction, UI trees,
   screenshots, and logcat, including inspection-only and screenshot-only requests.
 - iOS Simulator: use `$flutter-ios-debug` for environment/login gates, navigation,
@@ -63,12 +63,13 @@ Before any install, launch, attach, reload, restart, terminate, or force-stop:
 
 1. Identify the project, target device, package/app, current PID, VM Service, runtime
    owner, and expected backend/environment.
-2. Treat any live PID, VM Service, IDE debug adapter, `flutter run`, or visible app as
-   user-owned state.
+2. Establish who launched the app. A missing Mac-side Flutter controller does not
+   establish ownership. For Android, use the ownership evidence and cold-start gate
+   in `$flutter-android-debug`.
 3. If an IDE/debug adapter or machine run owns DevFS, never attach a second Flutter
-   compiler/controller. Preserve the session, continue only with inspection or in-app
-   navigation, and ask the user to trigger `r`/`R` through the owning controller when
-   reload/restart is necessary. Unknown owners remain blocked.
+   compiler/controller. Ask the user to trigger `r`/`R` through the owning controller
+   when a user-controlled session needs a refresh. For an agent-launched Android
+   session, consult the Android skill's cold-start gate. Unknown owners remain blocked.
 4. Use `r` for widget/layout/style/rendering changes and `R` for startup state,
    dependency injection, providers, globals, routes, or initialization changes.
 5. Always pass the PID confirmed by `discover --json` as `--expected-pid`; never
@@ -77,28 +78,28 @@ Before any install, launch, attach, reload, restart, terminate, or force-stop:
    target and every `--dart-define` / `--dart-define-from-file`. Missing compile
    identity must block runtime control rather than fall back to defaults.
    Treat raw define values as sensitive; inspect only the helper's redacted display.
-7. Verify that the same PID and expected environment remain after each runtime or
-   navigation action.
+7. Verify the expected environment after runtime changes. Check PID continuity
+   during live-session work and record the new PID after an authorized cold start.
 
 The bundled `flutter_session_ctl.py` helper is the only allowed reload/restart
 transport for safely attachable standalone sessions. Never activate, open, focus, or
 automate an IDE for this purpose. Do not use IDE menus, Command Palette, keyboard
 shortcuts, `osascript`, System Events, or other GUI automation. If the helper fails or
-times out, preserve the app process and report its exact failure; do not fall back to
-the IDE.
+times out, report its exact failure and return lifecycle decisions to the platform
+skill.
 
-Requests to inspect, debug, navigate, capture screenshots, or verify UI do not authorize
-build/install, uninstall, app-data clearing, force-stop, process termination, replacement
-launch, or a new `flutter run`. Use those only when no live target exists and the user
-requested a fresh run, or after explicit approval to replace the current session.
+Read-only requests authorize inspection only. For an Android QA task, the Android
+skill permits an in-place update and relaunch of a verified agent-launched debug
+app without another approval. Follow the platform skill for any other cold start.
 
 The platform QA skill owns navigation and evidence. Do not replace it with ad-hoc shell
 commands: use `test-android-apps:android-emulator-qa` for Android emulator UI trees,
 input, screenshots, and logcat, and `$flutter-ios-debug` for iOS Simulator environment
 gates, navigation, interaction, screenshots, and visual comparison.
 
-If the process disappears, stop and report it. Hot reload cannot restore a dead process,
-and launching the installed app may expose an older APK/IPA without the DevFS changes.
+If the process disappears, stop using the live transport and identify what happened.
+Continue through cold start only if the platform gate permits it. Verify the installed
+build before collecting evidence.
 
 For a cold launch, load the owning repository's launch configuration as the source of
 truth for flavor, dart-defines, package/app identity, and backend. This applies only

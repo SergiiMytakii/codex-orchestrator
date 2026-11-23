@@ -143,7 +143,10 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
       materializeWorkflowGeneration(input: {
         packageRoot: string; runtimeRoot: string; packageVersion: string; bootId: string;
       }): Promise<{ generationHash: string; generationRoot: string }>;
-      resolveWorkflowOperation(receipt: object, operationId: string): Promise<{ entryPath: string; sourceSkillPath?: string; schemaPath: string; workflowRoot: string }>;
+      resolveWorkflowOperation(receipt: object, operationId: string): Promise<{
+        entryPath: string; sourceSkillPath?: string; schemaPath: string; workflowRoot: string;
+        files: Array<{ path: string }>;
+      }>;
     };
     const receipt = await workflowAssets.materializeWorkflowGeneration({
       packageRoot: installed,
@@ -154,6 +157,15 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
     const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
     await assert.rejects(workflowAssets.resolveWorkflowOperation(receipt, 'code-review'));
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
+    const operationFiles = implementation.files.map((file) => file.path);
+    const reviewSkill = 'skills/code-review/SKILL.md';
+    const glossaryFormat = 'skills/domain-modeling/GLOSSARY-FORMAT.md';
+    assert.ok(operationFiles.includes(reviewSkill));
+    assert.ok(operationFiles.includes(glossaryFormat));
+    assert.ok(!operationFiles.includes('skills/domain-modeling/CONTEXT-FORMAT.md'));
+    const review = await readFile(join(receipt.generationRoot, reviewSkill), 'utf8');
+    assert.match(review, /target repository[\s\S]*?`CODING_STANDARDS\.md`,\s*`CONTRIBUTING\.md`[\s\S]*?Standards brief/u);
+    assert.match(await readFile(join(receipt.generationRoot, glossaryFormat), 'utf8'), /^# GLOSSARY\.md Format/u);
     for (const [operation, skill] of [[implementation, 'implement']] as const) {
       assert.equal(operation.sourceSkillPath, join(receipt.generationRoot, 'skills', skill, 'SKILL.md'));
       assert.equal(await readFile(operation.sourceSkillPath!, 'utf8'),

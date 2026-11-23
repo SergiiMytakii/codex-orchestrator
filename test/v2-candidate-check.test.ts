@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, writeFile, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -33,8 +33,9 @@ for (const mode of ['worker', 'host']) test(`${mode} check selects the complete 
     await writeFile(join(root, 'jest.config.js'), 'module.exports = {};');
     await writeFile(join(root, 'src/feature.ts'), 'original');
     await writeFile(join(root, '.gitignore'), 'node_modules/\nresolved-config.json\n');
+    await writeFile(join(root, 'CONTEXT.md'), '# Domain glossary');
     await exec('git', ['init', '-b', 'main'], { cwd: root });
-    await exec('git', ['add', 'src', 'package.json', 'jest.config.js', '.gitignore'], { cwd: root });
+    await exec('git', ['add', 'src', 'package.json', 'jest.config.js', '.gitignore', 'CONTEXT.md'], { cwd: root });
     await exec('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base'], { cwd: root });
     // Process double at the native Jest boundary: full suite has an unrelated failure.
     await writeFile(join(root, 'node_modules/.bin/jest'), `#!/bin/sh
@@ -69,7 +70,10 @@ echo unrelated-failure; exit 1
     assert.notEqual(unscoped.code, 0);
     assert.doesNotMatch(unscoped.stdout, /unrelated-failure/u, 'a missing selection must not launch the full suite');
     await writeFile(join(root, 'CODING_STANDARDS.md'), '# Coding standards');
+    await writeFile(join(root, 'CONTRIBUTING.md'), '# Contributing');
     await writeFile(join(root, 'AGENTS.md'), '# Repository instructions');
+    await rename(join(root, 'CONTEXT.md'), join(root, 'GLOSSARY.md'));
+    await writeFile(join(root, 'GLOSSARY-MAP.md'), '# Glossary map');
     const documentation = await run();
     assert.equal(documentation.code, 0, documentation.stdout + documentation.stderr);
     assert.match(documentation.stdout, /no related tests for a documentation-only change/u);
@@ -79,9 +83,11 @@ echo unrelated-failure; exit 1
     assert.equal(selected.code, 0, selected.stderr);
     assert.match(selected.stdout, /--findRelatedTests/u);
     assert.match(selected.stdout, /\.\/src\/feature.ts/u);
-    assert.doesNotMatch(selected.stdout, /CODING_STANDARDS\.md|AGENTS\.md/u);
-    await rm(join(root, 'CODING_STANDARDS.md'));
-    await rm(join(root, 'AGENTS.md'));
+    assert.doesNotMatch(selected.stdout, /CODING_STANDARDS\.md|CONTRIBUTING\.md|AGENTS\.md|CONTEXT\.md|GLOSSARY(?:-MAP)?\.md/u);
+    for (const file of ['CODING_STANDARDS.md', 'CONTRIBUTING.md', 'AGENTS.md', 'GLOSSARY-MAP.md']) {
+      await rm(join(root, file));
+    }
+    await rename(join(root, 'GLOSSARY.md'), join(root, 'CONTEXT.md'));
     await writeFile(join(root, 'src/feature.ts'), "export const hero = 'url(/assets/hero.png)';");
     await mkdir(join(root, 'public/assets'), { recursive: true });
     await writeFile(join(root, 'public/assets/hero.png'), 'original image');

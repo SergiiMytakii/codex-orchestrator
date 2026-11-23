@@ -74,7 +74,7 @@ def assert_attach_is_allowed(payload: dict) -> None:
         f"- reason: {reason}\n"
         "\n"
         "IDE/debug-adapter and machine-run owners must keep their original controller. "
-        "Use platform QA for inspection/navigation and ask the user to trigger reload/restart.\n"
+        "Use the platform QA skill to decide how to refresh this app safely.\n"
     )
     raise SystemExit(8)
 

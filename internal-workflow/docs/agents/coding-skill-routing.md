@@ -216,7 +216,5 @@ central configuration details:
 
 ## Runtime Safety
 
-For Flutter UI, follow [`tool-usage.md`](tool-usage.md). Treat live app, IDE, VM
-Service, and `flutter run` sessions as user-owned. Use the documented
-non-destructive attach path only after ownership discovery; never replace or
-terminate a user-owned session without explicit authority.
+For Flutter UI, follow [`tool-usage.md`](tool-usage.md) for runtime ownership,
+the attach path, and the platform skill that governs cold starts.

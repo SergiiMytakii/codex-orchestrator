@@ -1,13 +1,13 @@
 ---
 name: flutter-android-debug
-description: Safely debug Flutter UI on Android emulators while preserving existing app/IDE sessions. Always load and use `test-android-apps:android-emulator-qa` in the same turn for device selection, navigation, UI trees, screenshots, and logcat. Use for visual verification, reproduction, and authorized reload/restart coordination; pair with `flutter-attach-session` when a live Flutter runtime must be discovered or controlled.
+description: Debug and verify Flutter UI on Android devices and emulators, including data-preserving updates of agent-launched debug builds. Always load and use `test-android-apps:android-emulator-qa` for adb-based QA. Use `flutter-attach-session` for live Flutter ownership discovery and safe reload or restart.
 ---
 
 # Flutter Android Debug
 
-Use this tracked skill as the Android Flutter orchestrator. In the same turn, always
-load and use `test-android-apps:android-emulator-qa` for the actual emulator QA
-commands. Do not proceed with Android UI work if that plugin skill was not loaded.
+Always load and use `test-android-apps:android-emulator-qa` in the same turn for
+adb-based QA on Android devices and emulators. Use the selected serial for all
+device commands.
 
 Role split:
 
@@ -17,11 +17,8 @@ Role split:
   safely attachable standalone session.
 - This skill owns the lifecycle authorization gate between them.
 
-The Test Android Apps skill is mandatory for emulator QA. Use its documented adb/UI-tree
-surface for device selection, navigation, input, screenshots, and logcat; do not replace
-it with guessed coordinates or an unrelated shell workflow. Its quick-start
-build/install/launch sequence is a `cold-start` recipe only, not a default for a live
-Flutter session.
+Use UI-tree coordinates for input. Enter the `cold-start` mode before using the
+plugin's build/install/launch sequence.
 
 ## Reuse existing Android emulators
 
@@ -41,7 +38,7 @@ mismatch and ask before provisioning. Preserve existing app/runtime ownership.
 
 Before any state-changing command:
 
-1. Identify project, emulator serial, package, foreground activity, and expected
+1. Identify project, Android device serial, package, foreground activity, and expected
    environment.
 2. Record the package PID.
 3. Run Flutter discovery as JSON and inspect `selected.run.pid`,
@@ -56,8 +53,12 @@ python3 "../../skills/flutter-attach-session/scripts/flutter_session_ctl.py" \
   discover --project /absolute/path/to/project --device-udid <serial> --json
 ```
 
-Any live app PID, VM Service, IDE debug adapter, `flutter run`, or visible app is
-user-owned state. A booted emulator alone is not a live app session.
+Use the task's launch evidence to distinguish an agent-launched debug app from
+a user-started one. The agent's own install/launch command output or recorded
+handoff must identify this device and package and account for the current
+process. A missing Flutter controller or VM Service alone proves nothing about
+who launched the app. If the evidence is missing, stale, or contradicted,
+preserve the current session.
 
 ## Mode contract
 
@@ -77,8 +78,12 @@ Use when a package PID or Flutter runtime exists.
 - Call `$flutter-attach-session` with the PID confirmed by discovery only for a
   safely attachable standalone session. For `ide_debug_adapter` or `machine_run`,
   never attach a second compiler/controller. Keep using Test Android Apps for
-  inspection and in-app navigation; if reload/restart is necessary, ask the user to
-  trigger it through the owning controller and continue after confirmation:
+  inspection and in-app navigation. For a user-controlled runtime that needs a
+  reload/restart, ask the user to use the owning controller. For an agent-launched
+  runtime that cannot be updated safely in place through Flutter, use the
+  `cold-start` gate below.
+
+For a safely attachable standalone runtime:
 
 ```bash
 python3 "../../skills/flutter-attach-session/scripts/flutter_session_ctl.py" \
@@ -90,18 +95,30 @@ initialization changes.
 
 ### `cold-start`
 
-Use only when no live target exists and the user requested a fresh run/install, or
-after explicit permission to replace the current session.
+Use during authorized implementation or QA when the task requires a refreshed
+build and the agent's launch evidence establishes ownership of the current
+debug app. Proceed without asking again if hot reload or hot restart is unavailable
+or insufficient, including when the app is still running on Samsung after its
+Mac-side Flutter controller has disconnected.
 
-Before launch, resolve the exact flavor, build variant, package, activity, Flutter
-binary, dart-defines, and backend. Then follow the plugin's build/install/launch flow.
+Also use this mode when the user requests a fresh run/install and there is no live
+target, or explicitly authorizes replacing a verified user-started app outside the
+IDE. Keep an IDE-owned app running and ask the user to refresh it through the IDE.
+
+Before updating an agent-launched build, recheck the device and package ownership.
+Resolve the exact flavor, build variant, package, activity, Flutter binary,
+dart-defines, and backend from the project's launch configuration. Build the APK
+and update the same package in place with `adb -s <serial> install -r <apk>`.
+Require a successful data-preserving install before launching the resolved activity.
+If Android rejects the update, report the install error. Never work around it by
+uninstalling, clearing app data, or switching package IDs. Record the new PID,
+verify the expected variant and backend, and continue the requested QA.
 
 ## Hard stops
 
-- A request to debug, inspect, navigate, screenshot, or verify UI does not authorize
-  install, uninstall, clear data, force-stop, kill, replacement launch, or a new
-  `flutter run`.
-- Do not execute the plugin's build/install quick start while in `preserve-live` mode.
+- Inspection and screenshot-only requests use `inspect-only`. Replacement
+  requires the `cold-start` gate, and its agent-owned exception covers only a
+  data-preserving update and relaunch.
 - Do not send `q` to a Flutter controller.
 - Do not bypass `$flutter-attach-session` with a raw second attach client.
 - Never pass an override flag to attach to an IDE/debug-adapter or machine-run owner.
@@ -109,8 +126,8 @@ binary, dart-defines, and backend. Then follow the plugin's build/install/launch
   Command Palette, keyboard shortcuts, `osascript`, System Events, and other GUI
   automation are forbidden. If the helper fails, report its error without an IDE
   fallback.
-- If PID changes or disappears, stop and identify the preceding command. Do not launch
-  the installed APK and do not claim that hot reload can restore the process.
+- If PID changes or disappears unexpectedly, stop live control and identify the
+  preceding command. Recover only through the `cold-start` gate.
 - If runtime selection changes between discovery and action, rediscover and obtain a
   new confirmed PID; never reuse the old authorization.
 
@@ -127,6 +144,6 @@ Do not claim completion until:
 - the original process remained alive, or the authorized cold-start is documented
 - the expected variant/backend is confirmed
 - the exact target screen and interaction state are reached using the Android plugin
-- the final PID matches the preserved session
+- the final PID matches the preserved or newly launched session
 - a final screenshot is captured and visually inspected
 - relevant logcat evidence is checked when runtime behavior is involved

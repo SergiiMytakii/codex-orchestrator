@@ -81,7 +81,10 @@ changed, or needed to resolve uncertainty. Do not create a separate tracking fil
      substantiate the cost of the complete execution path with appropriate
      evidence; revisit the approach if it contradicts material assumptions.
    - **Coverage:** run the smallest checks covering changed behavior and known
-     failure conditions. A narrower check replaces a broader run only when it
+     failure conditions. For each new regression, verify that the standard
+     runner selects it in the intended suite. Use run output, test collection,
+     or a runner-selection check identifying the case. Wire in missing cases
+     and recheck. A narrower check replaces a broader run only when it
      preserves the relevant trigger, state, and assertions; isolated CI groups
      do not prove cross-group interactions. Run the full suite when repository
      policy or the affected contract requires it, or narrower checks cannot cover

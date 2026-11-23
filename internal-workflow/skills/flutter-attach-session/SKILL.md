@@ -47,11 +47,15 @@ owner:
 
 - `owner.type=ide_debug_adapter` or `owner.type=machine_run`: never attach a second
   compiler/controller. Preserve the runtime, use the platform QA skill for inspection
-  and navigation, and ask the user to trigger `r`/`R` through the owning controller
-  when reload/restart is necessary.
+  and navigation. For user-controlled sessions, ask the user to trigger `r`/`R`
+  through the owning controller when reload/restart is necessary.
 - safely attachable standalone VM Service: attach and send `r`/`R` normally.
-- missing or ambiguous VM Service: stop and report the blocker. Do not guess a URI,
-  start a replacement app, or fall back to the installed APK.
+- missing or ambiguous VM Service: stop live control and return to the platform
+  QA skill. Do not guess a URI or replace the app from this transport skill.
+
+For an Android build whose launch by the agent is verified, the Android skill
+owns the fallback to a data-preserving update and relaunch when live control
+cannot refresh the build.
 
 Record the app PID before runtime control and check it after reload/restart. If the PID
 disappears or changes unexpectedly, stop. Hot reload cannot restore a dead process.
@@ -178,7 +182,8 @@ Important:
   Command Palette, keyboard shortcuts, `osascript`, System Events, or other GUI
   automation for Flutter reload/restart.
 - If the helper fails, times out, or cannot attach, preserve the app and report the
-  exact helper output. Do not fall back to the owning IDE and do not treat an IDE
+  exact helper output. Return to the platform QA skill for its cold-start gate.
+  Do not fall back to the owning IDE and do not treat an IDE
   window becoming frontmost as runtime progress.
 - Never send `q` unless the user explicitly wants to terminate the app on the device.
 - A successful attach must show the standard Flutter key commands and a Dart VM Service URL.

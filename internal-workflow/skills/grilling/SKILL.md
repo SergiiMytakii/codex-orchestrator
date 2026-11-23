@@ -22,6 +22,7 @@ settled. Ask the whole frontier in one numbered round. For each question:
 - state the decision and enough context to answer it;
 - give two or three concrete options when multiple paths are plausible;
 - mark one recommended answer and explain the trade-off briefly;
+- phrase yes/no questions so “yes” accepts the recommendation;
 - say plainly when evidence leaves only one valid option.
 
 Then wait for the user's answers. Each answer reshapes the design tree: record

@@ -1,6 +1,6 @@
 ---
 name: ui-evidence-proof
-description: Verify every UI implementation, including Flutter and web, against the supplied design with fresh running-app screenshots. Fix in-scope differences and repeat until it matches. Also use for UI audits and visual proof requests.
+description: Verify visual fidelity and responsive behavior for UI implementations, including Flutter and web, with fresh running-app screenshots. Compare supplied designs, including Figma and Pencil, and fix in-scope differences. Also use for UI audits and visual proof requests.
 ---
 
 # UI Evidence Proof
@@ -21,6 +21,12 @@ Keep its reference image or frame link. Derive a compact checklist covering:
 - typography, colors, borders, radii, icons and images;
 - copy, interaction states, and required viewport variants.
 
+For a supplied design, use each in-scope frame's viewport dimensions as a
+reference for exact visual comparison. Use the project's supported sizes and
+layout conventions to derive behavior between frames and at other widths.
+Size containers and columns to the available space and let content wrap or
+reflow as needed. Keep intentional fixed dimensions, such as icon sizes.
+
 Record only user-approved deviations. Reuse existing components when they can
 match the target; do not silently simplify it. Label image-derived measurements
 as estimates. If no design is supplied, use the request and project UI conventions.
@@ -38,8 +44,13 @@ scroll positions and states. Use video or step screenshots for interactions.
 Widget/golden renders and logs support this proof but do not replace running-app
 screenshots.
 
-Cover the specified viewport sizes; for web layout include desktop unless excluded,
-and small screens when responsive behavior is affected.
+Cover the specified viewport sizes. For responsive layout work with a supplied
+design, capture the running UI for each in-scope frame
+at its reference viewport size and sample a supported width between distinct
+reference widths. With a single reference width, also cover narrow and wide
+supported widths, using the reference capture for either end it already covers.
+For web layout, include desktop unless excluded and small screens when
+responsive behavior is affected.
 
 For Flutter Android use `$flutter-android-debug` plus
 `test-android-apps:android-emulator-qa`; for iOS use `$flutter-ios-debug`.
@@ -60,6 +71,9 @@ Check every criterion plus overflow, clipping, overlap, truncation, and loading,
 empty/error states relevant to the task. Sample content or platform rasterization
 may differ; this does not excuse incorrect layout, missing assets, raw IDs, or
 broken labels.
+
+At widths without a matching frame, verify the expected reflow, text wrapping,
+and control usability. Check for unintended horizontal scrolling.
 
 During implementation, fix in-scope differences without another approval request,
 refresh through the safe runtime path, recapture, and compare again. Recheck the

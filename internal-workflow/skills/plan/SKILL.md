@@ -41,6 +41,8 @@ in the normative coding route.
 Before choosing an approach, apply the [Cost rule](../../docs/agents/coding-skill-routing.md#shared-kernel);
 retain its evidence and material assumptions in the existing plan.
 
+For each mandatory check, state which user requirement or existing behavior it protects, or which decision depends on its result; if none, omit the check from the plan.
+
 Ground technical claims in concrete source references, recorded once in the
 plan or review inputs as appropriate to the artifact format. Distinguish
 observed behavior, proposed changes, and unresolved assumptions. Do not present
@@ -70,6 +72,8 @@ Keep the settled draft as the base. Apply verified `BLOCKER`s in one minimal
 batch, requiring Authority, Trigger, Impact, and Minimal correction within
 the authorized outcome. Preserve structure, order, and information density.
 Do not add sections or repeat obligations merely for completeness.
+Before review and saving, check that the plan explicitly preserves each agreed
+work item, constraint, and acceptance criterion from the conversation.
 
 Return plan-changing `QUESTION`s to the user without guessing answers or
 copying findings into the draft as requirements. `OBSERVATION`s do not become
