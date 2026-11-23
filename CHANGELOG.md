@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.44] - 2026-11-23
+
+### Fixed
+
+- Scan added candidate lines for credentials while allowing unchanged diff context.
+- Keep repository coding guides and the root glossary out of related Jest and Flutter test selection.
+
+### Changed
+
+- Synchronize the packaged skills and workflow policies. Review discovers applicable coding standards and contribution guides in the target repository.
+- Rename the domain glossary and its bundled template to use the GLOSSARY naming convention.
+
 ## [2.0.43] - 2026-11-10
 
 ### Fixed
